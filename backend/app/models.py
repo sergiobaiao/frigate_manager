@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, Relationship, SQLModel
@@ -17,7 +17,7 @@ class Host(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    failures: list["FailureEvent"] = Relationship(back_populates="host")
+    failures: List["FailureEvent"] = Relationship(back_populates="host")
 
 
 class FailureEvent(SQLModel, table=True):
