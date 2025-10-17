@@ -103,6 +103,7 @@ export const fetchHostSummary = async (id: number) => {
       logs: Array<{ url: string; label: string }>;
       captured_at: string | null;
     };
+    current_check: HostCheck | null;
     latest_check: HostCheck | null;
   };
 };

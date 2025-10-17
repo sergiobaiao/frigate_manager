@@ -17,7 +17,7 @@ const HostDetailPage = () => {
     queryFn: () => fetchHostSummary(hostId),
     enabled: Number.isFinite(hostId),
     refetchInterval: (data) => {
-      const status = data?.latest_check?.status;
+      const status = data?.current_check?.status ?? data?.latest_check?.status;
       return status && (status === 'pending' || status === 'running') ? 2000 : false;
     }
   });
@@ -37,8 +37,11 @@ const HostDetailPage = () => {
   const failures = summaryQuery.data?.failures ?? [];
   const latestFailure = failures[0];
   const latestMedia = summaryQuery.data?.latest_media;
+  const currentCheck = summaryQuery.data?.current_check ?? null;
   const latestCheck = summaryQuery.data?.latest_check ?? null;
+  const displayCheck = currentCheck ?? latestCheck;
   const mediaBaseUrl = api.defaults.baseURL ?? (typeof window !== 'undefined' ? window.location.origin : '');
+  const latestLogEntry = displayCheck?.log?.length ? displayCheck.log[displayCheck.log.length - 1] : null;
 
   const triggerCheckMutation = useMutation({
     mutationFn: () => triggerHostCheck(hostId),
@@ -78,7 +81,7 @@ const HostDetailPage = () => {
   }, [latestMedia, mediaBaseUrl]);
 
   const hasEvidence = latestEvidence.screenshots.length > 0 || latestEvidence.logs.length > 0;
-  const isCheckActive = latestCheck ? ['pending', 'running'].includes(latestCheck.status) : false;
+  const isCheckActive = currentCheck ? ['pending', 'running'].includes(currentCheck.status) : false;
   const manualCheckDisabled = triggerCheckMutation.isLoading || !Number.isFinite(hostId) || isCheckActive;
 
   const handleManualCheck = () => {
@@ -100,8 +103,11 @@ const HostDetailPage = () => {
     if (latestEvidence.capturedAt) {
       return `Captured ${new Date(latestEvidence.capturedAt).toLocaleString('en-GB', { hour12: false })}`;
     }
+    if (displayCheck?.started_at) {
+      return `Last check ${new Date(displayCheck.started_at).toLocaleString('en-GB', { hour12: false })}`;
+    }
     return 'Most recent check';
-  }, [latestEvidence.capturedAt, latestFailure]);
+  }, [displayCheck?.started_at, latestEvidence.capturedAt, latestFailure]);
 
   return (
     <div className="grid" style={{ gap: '1.5rem' }}>
@@ -127,6 +133,9 @@ const HostDetailPage = () => {
             {isCheckActive && (
               <span className="hint-text">Check in progress. This view refreshes automatically.</span>
             )}
+            {!isCheckActive && latestLogEntry && (
+              <span className="hint-text">Last update: {latestLogEntry.message}</span>
+            )}
             {manualError && <span className="error-text">{manualError}</span>}
           </div>
         </div>
@@ -135,33 +144,44 @@ const HostDetailPage = () => {
       <section className="card">
         <div className="section-header" style={{ marginBottom: '1rem' }}>
           <h3 style={{ margin: 0 }}>Debug</h3>
-          {latestCheck ? (
-            <span className={`status-chip status-${latestCheck.status}`}>
-              {latestCheck.status}
+          {displayCheck ? (
+            <span className={`status-chip status-${displayCheck.status}`}>
+              {displayCheck.status}
             </span>
           ) : (
             <span className="status-chip status-idle">idle</span>
           )}
         </div>
-        {latestCheck ? (
+        {currentCheck ? (
+          <p className="hint-text" style={{ marginTop: '-0.5rem', marginBottom: '1rem' }}>
+            Tracking a {currentCheck.trigger} check started {renderTimestamp(currentCheck.started_at ?? currentCheck.created_at)}.
+          </p>
+        ) : (
+          latestCheck && (
+            <p className="hint-text" style={{ marginTop: '-0.5rem', marginBottom: '1rem' }}>
+              Showing the most recent {latestCheck.trigger} check from {renderTimestamp(latestCheck.started_at ?? latestCheck.created_at)}.
+            </p>
+          )
+        )}
+        {displayCheck ? (
           <div className="debug-summary">
             <div className="debug-meta">
               <p>
-                <strong>Trigger:</strong> {latestCheck.trigger}
+                <strong>Trigger:</strong> {displayCheck.trigger}
               </p>
               <p>
-                <strong>Summary:</strong> {latestCheck.summary ?? '—'}
+                <strong>Summary:</strong> {displayCheck.summary ?? '—'}
               </p>
               <p>
-                <strong>Started:</strong> {renderTimestamp(latestCheck.started_at ?? latestCheck.created_at)}
+                <strong>Started:</strong> {renderTimestamp(displayCheck.started_at ?? displayCheck.created_at)}
               </p>
               <p>
-                <strong>Finished:</strong> {renderTimestamp(latestCheck.finished_at)}
+                <strong>Finished:</strong> {renderTimestamp(displayCheck.finished_at)}
               </p>
             </div>
             <div className="debug-log">
-              {latestCheck.log?.length ? (
-                latestCheck.log.map((entry) => (
+              {displayCheck.log?.length ? (
+                displayCheck.log.map((entry) => (
                   <div key={`${entry.timestamp}-${entry.message}`} className="debug-log-entry">
                     <span className="debug-log-time">{renderTimestamp(entry.timestamp)}</span>
                     <span className="debug-log-message">{entry.message}</span>

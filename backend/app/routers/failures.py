@@ -206,6 +206,15 @@ def host_summary(host_id: int) -> dict:
             .order_by(FailureEvent.created_at.desc())
             .limit(25)
         ).all()
+        active_check = session.exec(
+            select(HostCheck)
+            .where(
+                HostCheck.host_id == host_id,
+                HostCheck.status.in_(["pending", "running"]),
+            )
+            .order_by(HostCheck.created_at.desc())
+            .limit(1)
+        ).first()
         latest_check = session.exec(
             select(HostCheck)
             .where(HostCheck.host_id == host_id)
@@ -217,5 +226,6 @@ def host_summary(host_id: int) -> dict:
         "host": host,
         "failures": serialized_failures,
         "latest_media": _latest_media(host, failures),
+        "current_check": _serialize_check(active_check) if active_check else None,
         "latest_check": _serialize_check(latest_check) if latest_check else None,
     }
