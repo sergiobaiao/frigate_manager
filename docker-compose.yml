@@ -4,7 +4,7 @@ services:
   backend:
     build:
       context: ./backend
-    image: frigate-monitor-backend
+    image: frigate-manager-backend
     ports:
       - "8000:8000"
     environment:
@@ -17,7 +17,7 @@ services:
   frontend:
     build:
       context: ./frontend
-    image: frigate-monitor-frontend
+    image: frigate-manager-frontend
     depends_on:
       - backend
     environment:
