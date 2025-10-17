@@ -1,4 +1,4 @@
-# Frigate Monitor
+# Frigate Manager
 
 Aplicação completa para monitorar instâncias do Frigate e gerar alertas automáticos via Telegram.
 

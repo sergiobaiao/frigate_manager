@@ -1,5 +1,5 @@
 {
-  "name": "frigate-monitor-frontend",
+  "name": "frigate-manager-frontend",
   "version": "0.1.0",
   "private": true,
   "scripts": {

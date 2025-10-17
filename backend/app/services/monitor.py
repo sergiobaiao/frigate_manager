@@ -165,7 +165,7 @@ async def check_host(host: Host, config_manager: ConfigManager) -> Optional[Fail
         session.refresh(failure_event)
 
     message_lines = [
-        f"<b>Frigate Monitor Alert</b>",
+        f"<b>Frigate Manager Alert</b>",
         f"Host: <code>{hostname}</code>",
         f"Affected cameras: {second_detection['count']}",
         f"Identifiers: {', '.join(camera_ids)}",

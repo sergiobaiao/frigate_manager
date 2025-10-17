@@ -12,7 +12,7 @@ from .tasks.scheduler import MonitorScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-app = FastAPI(title="Frigate Monitor")
+app = FastAPI(title="Frigate Manager")
 
 config_manager = ConfigManager()
 scheduler = MonitorScheduler(config_manager)

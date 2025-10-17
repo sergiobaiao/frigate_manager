@@ -13,7 +13,7 @@ const App = () => {
   return (
     <div className="app-container">
       <aside className="sidebar">
-        <h1 className="logo">Frigate Monitor</h1>
+        <h1 className="logo">Frigate Manager</h1>
         <nav>
           <Link className={location.pathname === '/' ? 'active' : ''} to="/">
             Dashboard
