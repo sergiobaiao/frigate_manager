@@ -252,7 +252,7 @@ async def check_host(
         detection = await _detect_failed_cameras(page)
         if recorder:
             recorder.log(f"Initial scan detected {detection['count']} failing cameras")
-        if detection["count"] <= 1:
+        if detection["count"] == 0:
             await context.close()
             await browser.close()
             return {
@@ -301,7 +301,7 @@ async def check_host(
         await context.close()
         await browser.close()
 
-    if second_detection["count"] <= 1:
+    if second_detection["count"] == 0:
         return {
             "status": "success",
             "summary": "Issue cleared before retry completed",
