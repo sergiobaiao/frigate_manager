@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Optional
 
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, Relationship, SQLModel
@@ -17,7 +17,7 @@ class Host(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    failures: List["FailureEvent"] = Relationship(back_populates="host")
+    failures: list["FailureEvent"] = Relationship(back_populates="host")
 
 
 class FailureEvent(SQLModel, table=True):
@@ -26,14 +26,14 @@ class FailureEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     host_id: int = Field(foreign_key="hosts.id")
     failure_count: int
-    camera_ids: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    camera_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     failure_start: Optional[datetime] = None
     first_screenshot_path: Optional[str] = None
     second_screenshot_path: Optional[str] = None
-    log_files: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    log_files: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-    host: Host = Relationship(back_populates="failures")
+    host: "Host" = Relationship(back_populates="failures")
 
 
 class LogEntry(SQLModel, table=True):
