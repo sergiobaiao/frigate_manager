@@ -8,7 +8,8 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlmodel import func, select
 
 from ..database import get_session
-from ..models import FailureEvent, Host, LogEntry
+from ..models import FailureEvent, Host, HostCheck, LogEntry
+from ..schemas.checks import HostCheckRead
 from ..schemas.failures import FailureEventRead, FailureStats
 from ..schemas.logs import LogEntryRead
 from ..utils.paths import DATA_DIR, LOG_DIR, SCREENSHOT_DIR
@@ -38,6 +39,11 @@ def _serialize_failure(failure: FailureEvent) -> FailureEventRead:
     payload.log_files = [
         path for raw in payload.log_files if (path := _public_media_path(raw))
     ]
+    return payload
+
+
+def _serialize_check(check: HostCheck) -> HostCheckRead:
+    payload = HostCheckRead.from_orm(check)
     return payload
 
 
@@ -200,9 +206,16 @@ def host_summary(host_id: int) -> dict:
             .order_by(FailureEvent.created_at.desc())
             .limit(25)
         ).all()
+        latest_check = session.exec(
+            select(HostCheck)
+            .where(HostCheck.host_id == host_id)
+            .order_by(HostCheck.created_at.desc())
+            .limit(1)
+        ).first()
     serialized_failures = [_serialize_failure(failure) for failure in failures]
     return {
         "host": host,
         "failures": serialized_failures,
         "latest_media": _latest_media(host, failures),
+        "latest_check": _serialize_check(latest_check) if latest_check else None,
     }

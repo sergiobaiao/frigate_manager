@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, status
 from sqlmodel import select
 
 from ..database import get_session
 from ..models import Host
+from ..schemas.checks import HostCheckRead
 from ..schemas.hosts import HostCreate, HostRead, HostUpdate
+from ..services.monitor import queue_host_check
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
 
@@ -58,3 +60,16 @@ def delete_host(host_id: int) -> dict:
         session.delete(host)
         session.commit()
     return {"status": "deleted"}
+
+
+@router.post("/{host_id}/check", response_model=HostCheckRead, status_code=status.HTTP_202_ACCEPTED)
+async def trigger_host_check(host_id: int, request: Request) -> HostCheckRead:
+    with get_session() as session:
+        host = session.get(Host, host_id)
+        if not host:
+            raise HTTPException(status_code=404, detail="Host not found")
+    config_manager = getattr(request.app.state, "config_manager", None)
+    if config_manager is None:
+        raise HTTPException(status_code=500, detail="Configuration manager unavailable")
+    check = queue_host_check(host_id, config_manager, trigger="manual")
+    return HostCheckRead.from_orm(check)

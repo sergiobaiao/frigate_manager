@@ -1,20 +1,25 @@
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 
 import FailureTable from '../components/FailureTable';
-import { fetchHostLogs, fetchHostSummary } from '../api';
+import { fetchHostLogs, fetchHostSummary, triggerHostCheck } from '../api';
 import api from '../api/client';
 
 const HostDetailPage = () => {
   const params = useParams();
   const hostId = Number(params.id);
   const [serviceFilter, setServiceFilter] = useState<string>('');
+  const [manualError, setManualError] = useState<string | null>(null);
 
   const summaryQuery = useQuery({
     queryKey: ['host-summary', hostId],
     queryFn: () => fetchHostSummary(hostId),
-    enabled: Number.isFinite(hostId)
+    enabled: Number.isFinite(hostId),
+    refetchInterval: (data) => {
+      const status = data?.latest_check?.status;
+      return status && (status === 'pending' || status === 'running') ? 2000 : false;
+    }
   });
 
   const logsQuery = useQuery({
@@ -32,7 +37,25 @@ const HostDetailPage = () => {
   const failures = summaryQuery.data?.failures ?? [];
   const latestFailure = failures[0];
   const latestMedia = summaryQuery.data?.latest_media;
+  const latestCheck = summaryQuery.data?.latest_check ?? null;
   const mediaBaseUrl = api.defaults.baseURL ?? (typeof window !== 'undefined' ? window.location.origin : '');
+
+  const triggerCheckMutation = useMutation({
+    mutationFn: () => triggerHostCheck(hostId),
+    onMutate: () => {
+      setManualError(null);
+    },
+    onSuccess: () => {
+      summaryQuery.refetch();
+    },
+    onError: (error: unknown) => {
+      if (error instanceof Error) {
+        setManualError(error.message);
+      } else {
+        setManualError('Failed to start check.');
+      }
+    }
+  });
 
   const resolveMediaUrl = (path: string) => {
     try {
@@ -55,6 +78,21 @@ const HostDetailPage = () => {
   }, [latestMedia, mediaBaseUrl]);
 
   const hasEvidence = latestEvidence.screenshots.length > 0 || latestEvidence.logs.length > 0;
+  const isCheckActive = latestCheck ? ['pending', 'running'].includes(latestCheck.status) : false;
+  const manualCheckDisabled = triggerCheckMutation.isLoading || !Number.isFinite(hostId) || isCheckActive;
+
+  const handleManualCheck = () => {
+    if (!Number.isFinite(hostId) || triggerCheckMutation.isLoading) {
+      return;
+    }
+    triggerCheckMutation.mutate();
+  };
+
+  const renderTimestamp = (value?: string | null) => {
+    if (!value) return '—';
+    return new Date(value).toLocaleString('en-GB', { hour12: false });
+  };
+
   const evidenceSubtitle = useMemo(() => {
     if (latestFailure) {
       return `Detected ${new Date(latestFailure.created_at).toLocaleString('en-GB', { hour12: false })}`;
@@ -68,12 +106,78 @@ const HostDetailPage = () => {
   return (
     <div className="grid" style={{ gap: '1.5rem' }}>
       {host && (
-        <div className="card">
-          <h2 style={{ margin: 0 }}>{host.name}</h2>
-          <p>{host.base_url}</p>
-          <p>Status: {host.enabled ? <span className="badge">Enabled</span> : 'Disabled'}</p>
+        <div className="card host-card">
+          <div className="host-card-info">
+            <h2 style={{ margin: 0 }}>{host.name}</h2>
+            <p>{host.base_url}</p>
+            <p>
+              Status:{' '}
+              {host.enabled ? <span className="badge">Enabled</span> : <span className="badge badge-muted">Disabled</span>}
+            </p>
+          </div>
+          <div className="host-card-actions">
+            <button
+              type="button"
+              className="action-button"
+              onClick={handleManualCheck}
+              disabled={manualCheckDisabled}
+            >
+              {triggerCheckMutation.isLoading || isCheckActive ? 'Checking…' : 'Force check'}
+            </button>
+            {isCheckActive && (
+              <span className="hint-text">Check in progress. This view refreshes automatically.</span>
+            )}
+            {manualError && <span className="error-text">{manualError}</span>}
+          </div>
         </div>
       )}
+
+      <section className="card">
+        <div className="section-header" style={{ marginBottom: '1rem' }}>
+          <h3 style={{ margin: 0 }}>Debug</h3>
+          {latestCheck ? (
+            <span className={`status-chip status-${latestCheck.status}`}>
+              {latestCheck.status}
+            </span>
+          ) : (
+            <span className="status-chip status-idle">idle</span>
+          )}
+        </div>
+        {latestCheck ? (
+          <div className="debug-summary">
+            <div className="debug-meta">
+              <p>
+                <strong>Trigger:</strong> {latestCheck.trigger}
+              </p>
+              <p>
+                <strong>Summary:</strong> {latestCheck.summary ?? '—'}
+              </p>
+              <p>
+                <strong>Started:</strong> {renderTimestamp(latestCheck.started_at ?? latestCheck.created_at)}
+              </p>
+              <p>
+                <strong>Finished:</strong> {renderTimestamp(latestCheck.finished_at)}
+              </p>
+            </div>
+            <div className="debug-log">
+              {latestCheck.log?.length ? (
+                latestCheck.log.map((entry) => (
+                  <div key={`${entry.timestamp}-${entry.message}`} className="debug-log-entry">
+                    <span className="debug-log-time">{renderTimestamp(entry.timestamp)}</span>
+                    <span className="debug-log-message">{entry.message}</span>
+                  </div>
+                ))
+              ) : (
+                <p style={{ color: '#9ca3af' }}>No log entries recorded for this check.</p>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p style={{ color: '#9ca3af' }}>
+            No checks have run for this host yet. Trigger one to begin collecting debug data.
+          </p>
+        )}
+      </section>
 
       {hasEvidence && (
         <section className="card">

@@ -91,6 +91,11 @@ label {
   font-size: 0.85rem;
 }
 
+.badge-muted {
+  background: rgba(156, 163, 175, 0.15);
+  color: #d1d5db;
+}
+
 .tag-input {
   display: flex;
   flex-wrap: wrap;
@@ -175,4 +180,115 @@ label {
 .file-list a {
   color: #93c5fd;
   text-decoration: none;
+}
+
+.host-card {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5rem;
+}
+
+.host-card-info p {
+  margin: 0.35rem 0;
+}
+
+.host-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.hint-text {
+  font-size: 0.85rem;
+  color: #9ca3af;
+}
+
+.error-text {
+  font-size: 0.85rem;
+  color: #fca5a5;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  text-transform: capitalize;
+  background: rgba(148, 163, 184, 0.2);
+  color: #e2e8f0;
+}
+
+.status-chip.status-running,
+.status-chip.status-pending {
+  background: rgba(59, 130, 246, 0.25);
+  color: #bfdbfe;
+}
+
+.status-chip.status-success {
+  background: rgba(16, 185, 129, 0.25);
+  color: #6ee7b7;
+}
+
+.status-chip.status-failure {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+}
+
+.status-chip.status-error {
+  background: rgba(249, 115, 22, 0.25);
+  color: #fcd34d;
+}
+
+.status-chip.status-skipped,
+.status-chip.status-idle {
+  background: rgba(148, 163, 184, 0.2);
+  color: #cbd5f5;
+}
+
+.debug-summary {
+  display: grid;
+  gap: 1.25rem;
+}
+
+@media (min-width: 900px) {
+  .debug-summary {
+    grid-template-columns: minmax(220px, 260px) 1fr;
+  }
+}
+
+.debug-meta p {
+  margin: 0.35rem 0;
+}
+
+.debug-log {
+  display: grid;
+  gap: 0.75rem;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 0.5rem;
+}
+
+.debug-log-entry {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.debug-log-time {
+  font-size: 0.8rem;
+  color: #9ca3af;
+}
+
+.debug-log-message {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace;
+  font-size: 0.9rem;
+  color: #f9fafb;
+  white-space: pre-wrap;
 }

@@ -16,6 +16,7 @@ class Host(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     failures: List["FailureEvent"] = Relationship(back_populates="host")
+    checks: List["HostCheck"] = Relationship(back_populates="host")
 
 
 class FailureEvent(SQLModel, table=True):
@@ -32,6 +33,7 @@ class FailureEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     host: "Host" = Relationship(back_populates="failures")
+    checks: List["HostCheck"] = Relationship(back_populates="failure")
 
 
 class LogEntry(SQLModel, table=True):
@@ -47,4 +49,23 @@ class LogEntry(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-__all__ = ["Host", "FailureEvent", "LogEntry"]
+class HostCheck(SQLModel, table=True):
+    __tablename__ = "host_checks"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    host_id: int = Field(foreign_key="hosts.id")
+    trigger: str = Field(default="scheduled")
+    status: str = Field(default="pending")
+    summary: Optional[str] = None
+    log: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    failure_event_id: Optional[int] = Field(default=None, foreign_key="failure_events.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    host: "Host" = Relationship(back_populates="checks")
+    failure: Optional["FailureEvent"] = Relationship(back_populates="checks")
+
+
+__all__ = ["Host", "FailureEvent", "LogEntry", "HostCheck"]

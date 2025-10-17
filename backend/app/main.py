@@ -18,6 +18,8 @@ app = FastAPI(title="Frigate Manager")
 
 config_manager = ConfigManager()
 scheduler = MonitorScheduler(config_manager)
+app.state.config_manager = config_manager
+app.state.scheduler = scheduler
 
 
 @app.on_event("startup")

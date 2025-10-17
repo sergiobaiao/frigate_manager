@@ -10,15 +10,29 @@ export type Host = {
 };
 
 export type FailureEvent = {
-  id: number;
-  host_id: number;
-  failure_count: number;
+    id: number;
+    host_id: number;
+    failure_count: number;
   camera_ids: string[];
   failure_start: string | null;
   first_screenshot_path: string | null;
   second_screenshot_path: string | null;
   log_files: string[];
+    created_at: string;
+};
+
+export type HostCheck = {
+  id: number;
+  host_id: number;
+  trigger: string;
+  status: string;
+  summary: string | null;
+  log: Array<{ timestamp: string; message: string }>;
+  started_at: string | null;
+  finished_at: string | null;
+  failure_event_id: number | null;
   created_at: string;
+  updated_at: string;
 };
 
 export type Config = {
@@ -89,6 +103,7 @@ export const fetchHostSummary = async (id: number) => {
       logs: Array<{ url: string; label: string }>;
       captured_at: string | null;
     };
+    latest_check: HostCheck | null;
   };
 };
 
@@ -106,4 +121,9 @@ export const fetchHostLogs = async (id: number, service?: string) => {
     message: string | null;
     raw: Record<string, unknown>;
   }>;
+};
+
+export const triggerHostCheck = async (id: number): Promise<HostCheck> => {
+  const { data } = await api.post<HostCheck>(`/hosts/${id}/check`);
+  return data;
 };
