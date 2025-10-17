@@ -31,6 +31,7 @@ const HostDetailPage = () => {
   const host = summaryQuery.data?.host;
   const failures = summaryQuery.data?.failures ?? [];
   const latestFailure = failures[0];
+  const latestMedia = summaryQuery.data?.latest_media;
   const mediaBaseUrl = api.defaults.baseURL ?? (typeof window !== 'undefined' ? window.location.origin : '');
 
   const resolveMediaUrl = (path: string) => {
@@ -42,28 +43,27 @@ const HostDetailPage = () => {
   };
 
   const latestEvidence = useMemo(() => {
-    if (!latestFailure) {
-      return { screenshots: [] as Array<{ url: string; label: string }>, logs: [] as Array<{ url: string; label: string }> };
+    const screenshots = (latestMedia?.screenshots ?? []).map((item) => ({
+      url: resolveMediaUrl(item.url),
+      label: item.label
+    }));
+    const logs = (latestMedia?.logs ?? []).map((item) => ({
+      url: resolveMediaUrl(item.url),
+      label: item.label
+    }));
+    return { screenshots, logs, capturedAt: latestMedia?.captured_at ?? null };
+  }, [latestMedia, mediaBaseUrl]);
+
+  const hasEvidence = latestEvidence.screenshots.length > 0 || latestEvidence.logs.length > 0;
+  const evidenceSubtitle = useMemo(() => {
+    if (latestFailure) {
+      return `Detected ${new Date(latestFailure.created_at).toLocaleString('en-GB', { hour12: false })}`;
     }
-    const screenshots = [
-      latestFailure.first_screenshot_path,
-      latestFailure.second_screenshot_path
-    ]
-      .filter((value): value is string => Boolean(value))
-      .map((value, index) => ({
-        url: resolveMediaUrl(value),
-        label: index === 0 ? 'Initial check' : 'Retry check'
-      }));
-    const logs = (latestFailure.log_files ?? []).map((value) => {
-      const segments = value.split('/').filter(Boolean);
-      const filename = segments[segments.length - 1] ?? 'log.txt';
-      return {
-        url: resolveMediaUrl(value),
-        label: filename
-      };
-    });
-    return { screenshots, logs };
-  }, [latestFailure, mediaBaseUrl]);
+    if (latestEvidence.capturedAt) {
+      return `Captured ${new Date(latestEvidence.capturedAt).toLocaleString('en-GB', { hour12: false })}`;
+    }
+    return 'Most recent check';
+  }, [latestEvidence.capturedAt, latestFailure]);
 
   return (
     <div className="grid" style={{ gap: '1.5rem' }}>
@@ -75,13 +75,11 @@ const HostDetailPage = () => {
         </div>
       )}
 
-      {latestFailure && (
+      {hasEvidence && (
         <section className="card">
           <div className="section-header" style={{ marginBottom: '1rem' }}>
             <h3>Latest evidence</h3>
-            <span style={{ color: '#9ca3af' }}>
-              Detected {new Date(latestFailure.created_at).toLocaleString('en-GB', { hour12: false })}
-            </span>
+            <span style={{ color: '#9ca3af' }}>{evidenceSubtitle}</span>
           </div>
           <div className="evidence-grid">
             <div>

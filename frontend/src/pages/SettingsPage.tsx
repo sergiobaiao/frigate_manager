@@ -7,6 +7,7 @@ import TagInput from '../components/TagInput';
 const SettingsPage = () => {
   const queryClient = useQueryClient();
   const configQuery = useQuery({ queryKey: ['config'], queryFn: fetchConfig });
+  const config = configQuery.data;
   const mutation = useMutation({
     mutationFn: (payload: Partial<Config>) => updateConfig(payload),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['config'] })
@@ -32,8 +33,6 @@ const SettingsPage = () => {
     };
     await mutation.mutateAsync(payload);
   };
-
-  const config = configQuery.data;
 
   return (
     <div className="card" style={{ maxWidth: 720 }}>

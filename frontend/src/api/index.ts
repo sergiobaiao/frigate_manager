@@ -84,6 +84,11 @@ export const fetchHostSummary = async (id: number) => {
   return data as {
     host: Host;
     failures: FailureEvent[];
+    latest_media: {
+      screenshots: Array<{ url: string; label: string }>;
+      logs: Array<{ url: string; label: string }>;
+      captured_at: string | null;
+    };
   };
 };
 

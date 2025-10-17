@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlmodel import func, select
@@ -10,7 +11,7 @@ from ..database import get_session
 from ..models import FailureEvent, Host, LogEntry
 from ..schemas.failures import FailureEventRead, FailureStats
 from ..schemas.logs import LogEntryRead
-from ..utils.paths import DATA_DIR
+from ..utils.paths import DATA_DIR, LOG_DIR, SCREENSHOT_DIR
 
 router = APIRouter(prefix="/failures", tags=["failures"])
 
@@ -38,6 +39,79 @@ def _serialize_failure(failure: FailureEvent) -> FailureEventRead:
         path for raw in payload.log_files if (path := _public_media_path(raw))
     ]
     return payload
+
+
+def _gather_recent_files(paths: Iterable[str], limit: int = 2) -> List[str]:
+    results: List[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        if raw and raw not in seen:
+            seen.add(raw)
+            results.append(raw)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _latest_media(host: Host, failures: List[FailureEvent]) -> dict:
+    screenshot_candidates: List[str] = []
+    for failure in failures:
+        screenshot_candidates.extend(
+            [
+                str(path)
+                for path in [failure.second_screenshot_path, failure.first_screenshot_path]
+                if path
+            ]
+        )
+
+    if len(screenshot_candidates) < 2:
+        pattern = f"{host.name}-*.png"
+        recent_fs = sorted(
+            SCREENSHOT_DIR.glob(pattern),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for item in recent_fs:
+            screenshot_candidates.append(str(item))
+            if len(screenshot_candidates) >= 2:
+                break
+
+    screenshot_paths = _gather_recent_files(screenshot_candidates, limit=2)
+    captured_at: Optional[str] = None
+    screenshots = []
+    labels = ["Latest", "Previous"]
+    for index, raw_path in enumerate(screenshot_paths):
+        path_obj = Path(raw_path)
+        if captured_at is None:
+            try:
+                timestamp = datetime.fromtimestamp(path_obj.stat().st_mtime, tz=timezone.utc)
+                captured_at = timestamp.isoformat()
+            except FileNotFoundError:
+                captured_at = None
+        if public := _public_media_path(raw_path):
+            label = labels[index] if index < len(labels) else f"Screenshot {index + 1}"
+            screenshots.append({"url": public, "label": label})
+
+    log_candidates: List[str] = []
+    for failure in failures:
+        log_candidates.extend(failure.log_files or [])
+
+    if not log_candidates:
+        log_pattern = f"{host.name}-*.log"
+        recent_logs = sorted(
+            LOG_DIR.glob(log_pattern),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        log_candidates = [str(item) for item in recent_logs[:3]]
+
+    logs = []
+    for raw_path in _gather_recent_files(log_candidates, limit=5):
+        if public := _public_media_path(raw_path):
+            filename = Path(raw_path).name
+            logs.append({"url": public, "label": filename})
+
+    return {"screenshots": screenshots, "logs": logs, "captured_at": captured_at}
 
 
 @router.get("", response_model=List[FailureEventRead])
@@ -126,7 +200,9 @@ def host_summary(host_id: int) -> dict:
             .order_by(FailureEvent.created_at.desc())
             .limit(25)
         ).all()
+    serialized_failures = [_serialize_failure(failure) for failure in failures]
     return {
         "host": host,
-        "failures": [_serialize_failure(failure) for failure in failures],
+        "failures": serialized_failures,
+        "latest_media": _latest_media(host, failures),
     }
