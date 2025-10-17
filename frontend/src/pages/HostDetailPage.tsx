@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 
 import FailureTable from '../components/FailureTable';
 import { fetchHostLogs, fetchHostSummary } from '../api';
+import api from '../api/client';
 
 const HostDetailPage = () => {
   const params = useParams();
@@ -29,6 +30,40 @@ const HostDetailPage = () => {
 
   const host = summaryQuery.data?.host;
   const failures = summaryQuery.data?.failures ?? [];
+  const latestFailure = failures[0];
+  const mediaBaseUrl = api.defaults.baseURL ?? (typeof window !== 'undefined' ? window.location.origin : '');
+
+  const resolveMediaUrl = (path: string) => {
+    try {
+      return mediaBaseUrl ? new URL(path, mediaBaseUrl).toString() : path;
+    } catch {
+      return path;
+    }
+  };
+
+  const latestEvidence = useMemo(() => {
+    if (!latestFailure) {
+      return { screenshots: [] as Array<{ url: string; label: string }>, logs: [] as Array<{ url: string; label: string }> };
+    }
+    const screenshots = [
+      latestFailure.first_screenshot_path,
+      latestFailure.second_screenshot_path
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map((value, index) => ({
+        url: resolveMediaUrl(value),
+        label: index === 0 ? 'Initial check' : 'Retry check'
+      }));
+    const logs = (latestFailure.log_files ?? []).map((value) => {
+      const segments = value.split('/').filter(Boolean);
+      const filename = segments[segments.length - 1] ?? 'log.txt';
+      return {
+        url: resolveMediaUrl(value),
+        label: filename
+      };
+    });
+    return { screenshots, logs };
+  }, [latestFailure, mediaBaseUrl]);
 
   return (
     <div className="grid" style={{ gap: '1.5rem' }}>
@@ -38,6 +73,50 @@ const HostDetailPage = () => {
           <p>{host.base_url}</p>
           <p>Status: {host.enabled ? <span className="badge">Enabled</span> : 'Disabled'}</p>
         </div>
+      )}
+
+      {latestFailure && (
+        <section className="card">
+          <div className="section-header" style={{ marginBottom: '1rem' }}>
+            <h3>Latest evidence</h3>
+            <span style={{ color: '#9ca3af' }}>
+              Detected {new Date(latestFailure.created_at).toLocaleString('en-GB', { hour12: false })}
+            </span>
+          </div>
+          <div className="evidence-grid">
+            <div>
+              <h4 style={{ marginTop: 0 }}>Screenshots</h4>
+              {latestEvidence.screenshots.length ? (
+                <div className="screenshot-grid">
+                  {latestEvidence.screenshots.map((shot) => (
+                    <a key={shot.label} href={shot.url} target="_blank" rel="noreferrer" className="screenshot-preview">
+                      <img src={shot.url} alt={shot.label} />
+                      <span>{shot.label}</span>
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <p style={{ color: '#9ca3af' }}>No screenshots available.</p>
+              )}
+            </div>
+            <div>
+              <h4 style={{ marginTop: 0 }}>Log files</h4>
+              {latestEvidence.logs.length ? (
+                <ul className="file-list">
+                  {latestEvidence.logs.map((file) => (
+                    <li key={file.url}>
+                      <a href={file.url} target="_blank" rel="noreferrer">
+                        {file.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p style={{ color: '#9ca3af' }}>No log files attached.</p>
+              )}
+            </div>
+          </div>
+        </section>
       )}
 
       <section>

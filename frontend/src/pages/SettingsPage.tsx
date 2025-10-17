@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { Config, fetchConfig, updateConfig } from '../api';
+import TagInput from '../components/TagInput';
 
 const SettingsPage = () => {
   const queryClient = useQueryClient();
@@ -12,10 +13,24 @@ const SettingsPage = () => {
   });
 
   const [formState, setFormState] = useState<Partial<Config>>({});
+  const [mentionIds, setMentionIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (config?.MENTION_USER_IDS !== undefined) {
+      const ids = config.MENTION_USER_IDS.split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+      setMentionIds(ids);
+    }
+  }, [config?.MENTION_USER_IDS]);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    await mutation.mutateAsync(formState);
+    const payload: Partial<Config> = {
+      ...formState,
+      MENTION_USER_IDS: mentionIds.join(',')
+    };
+    await mutation.mutateAsync(payload);
   };
 
   const config = configQuery.data;
@@ -41,9 +56,13 @@ const SettingsPage = () => {
         </div>
         <div>
           <label>Mention User IDs</label>
-          <input
-            defaultValue={config?.MENTION_USER_IDS}
-            onChange={(event) => setFormState((prev) => ({ ...prev, MENTION_USER_IDS: event.target.value }))}
+          <TagInput
+            value={mentionIds}
+            onChange={(values) => {
+              setMentionIds(values);
+              setFormState((prev) => ({ ...prev, MENTION_USER_IDS: values.join(',') }));
+            }}
+            placeholder="Enter IDs and press Enter"
           />
         </div>
         <div>

@@ -90,3 +90,89 @@ label {
   padding: 0.25rem 0.75rem;
   font-size: 0.85rem;
 }
+
+.tag-input {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  background: #111827;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  padding: 0.4rem;
+  min-height: 48px;
+  box-sizing: border-box;
+}
+
+.tag-input input {
+  border: none;
+  background: transparent;
+  color: inherit;
+  flex: 1;
+  min-width: 120px;
+  padding: 0.3rem 0.4rem;
+  outline: none;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(59, 130, 246, 0.25);
+  color: #bfdbfe;
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.85rem;
+}
+
+.tag button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.evidence-grid {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.screenshot-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.screenshot-preview {
+  display: grid;
+  gap: 0.5rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+.screenshot-preview img {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #374151;
+  object-fit: cover;
+}
+
+.screenshot-preview span {
+  font-size: 0.9rem;
+  color: #d1d5db;
+}
+
+.file-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.file-list a {
+  color: #93c5fd;
+  text-decoration: none;
+}

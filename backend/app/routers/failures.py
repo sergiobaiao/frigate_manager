@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -9,8 +10,34 @@ from ..database import get_session
 from ..models import FailureEvent, Host, LogEntry
 from ..schemas.failures import FailureEventRead, FailureStats
 from ..schemas.logs import LogEntryRead
+from ..utils.paths import DATA_DIR
 
 router = APIRouter(prefix="/failures", tags=["failures"])
+
+
+def _public_media_path(raw_path: Optional[str]) -> Optional[str]:
+    if not raw_path:
+        return None
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = (DATA_DIR / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    try:
+        relative = candidate.relative_to(DATA_DIR)
+    except ValueError:
+        return None
+    return f"/media/{relative.as_posix()}"
+
+
+def _serialize_failure(failure: FailureEvent) -> FailureEventRead:
+    payload = FailureEventRead.from_orm(failure)
+    payload.first_screenshot_path = _public_media_path(payload.first_screenshot_path)
+    payload.second_screenshot_path = _public_media_path(payload.second_screenshot_path)
+    payload.log_files = [
+        path for raw in payload.log_files if (path := _public_media_path(raw))
+    ]
+    return payload
 
 
 @router.get("", response_model=List[FailureEventRead])
@@ -22,7 +49,7 @@ def list_failures(host_id: Optional[int] = None, limit: int = Query(100, le=1000
         if limit:
             query = query.limit(limit)
         failures = session.exec(query).all()
-    return failures
+    return [_serialize_failure(failure) for failure in failures]
 
 
 @router.get("/stats", response_model=List[FailureStats])
@@ -57,7 +84,7 @@ def get_failure(failure_id: int) -> FailureEventRead:
         failure = session.get(FailureEvent, failure_id)
         if not failure:
             raise HTTPException(status_code=404, detail="Failure not found")
-    return failure
+    return _serialize_failure(failure)
 
 
 @router.get("/{failure_id}/logs", response_model=List[LogEntryRead])
@@ -101,5 +128,5 @@ def host_summary(host_id: int) -> dict:
         ).all()
     return {
         "host": host,
-        "failures": failures,
+        "failures": [_serialize_failure(failure) for failure in failures],
     }

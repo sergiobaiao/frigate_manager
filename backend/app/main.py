@@ -4,11 +4,13 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .config import ConfigManager
 from .database import init_db
 from .routers import configuration, failures, hosts
 from .tasks.scheduler import MonitorScheduler
+from .utils.paths import DATA_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -44,6 +46,8 @@ app.add_middleware(
 app.include_router(hosts.router)
 app.include_router(configuration.router)
 app.include_router(failures.router)
+
+app.mount("/media", StaticFiles(directory=str(DATA_DIR), check_dir=False), name="media")
 
 
 @app.get("/health")
