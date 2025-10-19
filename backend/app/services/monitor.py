@@ -264,9 +264,8 @@ async def check_host(
                 title = await page.title()
             except Exception:  # pragma: no cover - best effort
                 title = None
-            recorder.log(
-                f"Dashboard loaded{f' with title \"{title}\"' if title else ''}"
-            )
+            title_suffix = f' with title "{title}"' if title else ""
+            recorder.log(f"Dashboard loaded{title_suffix}")
         detection = await _detect_failed_cameras(page)
         if recorder:
             recorder.log(f"Initial scan detected {detection['count']} failing cameras")
@@ -336,9 +335,8 @@ async def check_host(
                 retry_title = await page.title()
             except Exception:  # pragma: no cover - best effort
                 retry_title = None
-            recorder.log(
-                f"Retry dashboard loaded{f' with title \"{retry_title}\"' if retry_title else ''}"
-            )
+            retry_title_suffix = f' with title "{retry_title}"' if retry_title else ""
+            recorder.log(f"Retry dashboard loaded{retry_title_suffix}")
         second_detection = await _detect_failed_cameras(page)
         if recorder:
             recorder.log(f"Retry detected {second_detection['count']} failing cameras")
