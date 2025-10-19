@@ -80,7 +80,6 @@ const HostDetailPage = () => {
     return { screenshots, logs, capturedAt: latestMedia?.captured_at ?? null };
   }, [latestMedia, mediaBaseUrl]);
 
-  const hasEvidence = latestEvidence.screenshots.length > 0 || latestEvidence.logs.length > 0;
   const isCheckActive = currentCheck ? ['pending', 'running'].includes(currentCheck.status) : false;
   const manualCheckDisabled = triggerCheckMutation.isLoading || !Number.isFinite(hostId) || isCheckActive;
 
@@ -199,47 +198,51 @@ const HostDetailPage = () => {
         )}
       </section>
 
-      {hasEvidence && (
-        <section className="card">
-          <div className="section-header" style={{ marginBottom: '1rem' }}>
-            <h3>Latest evidence</h3>
-            <span style={{ color: '#9ca3af' }}>{evidenceSubtitle}</span>
+      <section className="card">
+        <div className="section-header" style={{ marginBottom: '1rem' }}>
+          <h3>Latest evidence</h3>
+          <span style={{ color: '#9ca3af' }}>{evidenceSubtitle}</span>
+        </div>
+        <div className="evidence-grid">
+          <div>
+            <h4 style={{ marginTop: 0 }}>Screenshots</h4>
+            {latestEvidence.screenshots.length ? (
+              <div className="screenshot-grid">
+                {latestEvidence.screenshots.map((shot) => (
+                  <a key={shot.label} href={shot.url} target="_blank" rel="noreferrer" className="screenshot-preview">
+                    <img src={shot.url} alt={shot.label} />
+                    <span>{shot.label}</span>
+                  </a>
+                ))}
+              </div>
+            ) : (
+              <p style={{ color: '#9ca3af' }}>
+                No screenshots captured yet. Evidence will appear here after a failure. Files are stored under{' '}
+                <code>data/screenshots</code> on the server.
+              </p>
+            )}
           </div>
-          <div className="evidence-grid">
-            <div>
-              <h4 style={{ marginTop: 0 }}>Screenshots</h4>
-              {latestEvidence.screenshots.length ? (
-                <div className="screenshot-grid">
-                  {latestEvidence.screenshots.map((shot) => (
-                    <a key={shot.label} href={shot.url} target="_blank" rel="noreferrer" className="screenshot-preview">
-                      <img src={shot.url} alt={shot.label} />
-                      <span>{shot.label}</span>
+          <div>
+            <h4 style={{ marginTop: 0 }}>Log files</h4>
+            {latestEvidence.logs.length ? (
+              <ul className="file-list">
+                {latestEvidence.logs.map((file) => (
+                  <li key={file.url}>
+                    <a href={file.url} target="_blank" rel="noreferrer">
+                      {file.label}
                     </a>
-                  ))}
-                </div>
-              ) : (
-                <p style={{ color: '#9ca3af' }}>No screenshots available.</p>
-              )}
-            </div>
-            <div>
-              <h4 style={{ marginTop: 0 }}>Log files</h4>
-              {latestEvidence.logs.length ? (
-                <ul className="file-list">
-                  {latestEvidence.logs.map((file) => (
-                    <li key={file.url}>
-                      <a href={file.url} target="_blank" rel="noreferrer">
-                        {file.label}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p style={{ color: '#9ca3af' }}>No log files attached.</p>
-              )}
-            </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p style={{ color: '#9ca3af' }}>
+                No log files available yet. Captured logs will be listed here and can also be found in{' '}
+                <code>data/logs</code>.
+              </p>
+            )}
           </div>
-        </section>
-      )}
+        </div>
+      </section>
 
       <section>
         <div className="section-header">
