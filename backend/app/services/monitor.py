@@ -234,6 +234,16 @@ async def check_host(
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
+        console_messages: List[str] = []
+
+        if recorder:
+            def _capture_console(message) -> None:
+                entry = f"[{message.type}] {message.text()}"
+                console_messages.append(entry)
+                if len(console_messages) > 25:
+                    del console_messages[0]
+
+            page.on("console", _capture_console)
         if recorder:
             recorder.log("Loading Frigate dashboard")
         try:
@@ -249,10 +259,25 @@ async def check_host(
                 "summary": "Unable to load Frigate dashboard",
                 "failure_event": None,
             }
+        if recorder:
+            try:
+                title = await page.title()
+            except Exception:  # pragma: no cover - best effort
+                title = None
+            recorder.log(
+                f"Dashboard loaded{f' with title \"{title}\"' if title else ''}"
+            )
         detection = await _detect_failed_cameras(page)
         if recorder:
             recorder.log(f"Initial scan detected {detection['count']} failing cameras")
         if detection["count"] == 0:
+            if recorder:
+                preview = "; ".join(console_messages[-5:])[:500]
+                recorder.log(
+                    f"Recent browser console output: {preview}"
+                    if preview
+                    else "No browser console output captured"
+                )
             await context.close()
             await browser.close()
             return {
@@ -263,7 +288,13 @@ async def check_host(
         first_path = SCREENSHOT_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial.png"
         first_screenshot = await _fetch_page_screenshot(page, first_path)
         if recorder:
-            recorder.log("Captured initial screenshot")
+            recorder.log(f"Captured initial screenshot at {first_screenshot}")
+            preview = "; ".join(console_messages[-5:])[:500]
+            recorder.log(
+                f"Recent browser console output: {preview}"
+                if preview
+                else "No browser console output captured"
+            )
         await context.close()
         await browser.close()
 
@@ -275,6 +306,16 @@ async def check_host(
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
+        retry_console_messages: List[str] = []
+
+        if recorder:
+            def _capture_retry_console(message) -> None:
+                entry = f"[{message.type}] {message.text()}"
+                retry_console_messages.append(entry)
+                if len(retry_console_messages) > 25:
+                    del retry_console_messages[0]
+
+            page.on("console", _capture_retry_console)
         if recorder:
             recorder.log("Retrying Frigate dashboard after delay")
         try:
@@ -290,6 +331,14 @@ async def check_host(
                 "summary": "Retry failed to load dashboard",
                 "failure_event": None,
             }
+        if recorder:
+            try:
+                retry_title = await page.title()
+            except Exception:  # pragma: no cover - best effort
+                retry_title = None
+            recorder.log(
+                f"Retry dashboard loaded{f' with title \"{retry_title}\"' if retry_title else ''}"
+            )
         second_detection = await _detect_failed_cameras(page)
         if recorder:
             recorder.log(f"Retry detected {second_detection['count']} failing cameras")
@@ -297,7 +346,13 @@ async def check_host(
         second_path = SCREENSHOT_DIR / f"{hostname}-{retry_timestamp.strftime('%Y%m%dT%H%M%S')}-retry.png"
         second_screenshot = await _fetch_page_screenshot(page, second_path)
         if recorder:
-            recorder.log("Captured retry screenshot")
+            recorder.log(f"Captured retry screenshot at {second_screenshot}")
+            retry_preview = "; ".join(retry_console_messages[-5:])[:500]
+            recorder.log(
+                f"Recent browser console output on retry: {retry_preview}"
+                if retry_preview
+                else "No browser console output captured on retry"
+            )
         await context.close()
         await browser.close()
 
@@ -335,6 +390,10 @@ async def check_host(
             parsed_entries[service] = entries
             with get_session() as session:
                 persist_log_entries(session, host.id, service, entries)
+            if recorder:
+                recorder.log(
+                    f"Saved {service} logs to {path}" if content else f"No {service} log content retrieved"
+                )
 
     failure_start = None
     for service in services:
