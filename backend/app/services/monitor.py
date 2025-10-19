@@ -238,7 +238,7 @@ async def check_host(
 
         if recorder:
             def _capture_console(message) -> None:
-                entry = f"[{message.type}] {message.text()}"
+                entry = f"[{message.type}] {message.text}"
                 console_messages.append(entry)
                 if len(console_messages) > 25:
                     del console_messages[0]
