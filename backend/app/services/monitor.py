@@ -104,7 +104,8 @@ async def _detect_failed_cameras(page) -> List[str]:
     async def _scan_once() -> List[str]:
         failed = await page.evaluate(
             """
-            (failureTexts, failureStates, labelSelectors) => {
+            (args) => {
+                const { failureTexts, failureStates, labelSelectors } = args;
                 const normalizedTexts = failureTexts.map((text) => text.toLowerCase());
                 const normalizedStates = failureStates.map((state) => state.toLowerCase());
                 const identifiers = [];
@@ -251,6 +252,21 @@ async def _detect_failed_cameras(page) -> List[str]:
                                 }
                             }
                         }
+
+                        if (node.parentElement) {
+                            node = node.parentElement;
+                            continue;
+                        }
+                        if (node.assignedSlot) {
+                            node = node.assignedSlot;
+                            continue;
+                        }
+                        const root = node.getRootNode ? node.getRootNode() : null;
+                        if (root && root.host) {
+                            node = root.host;
+                            continue;
+                        }
+                        break;
                     }
                     if (!identifier) {
                         identifier = `camera-${index + 1}`;
@@ -264,9 +280,11 @@ async def _detect_failed_cameras(page) -> List[str]:
                 return identifiers;
             }
             """,
-            failure_texts,
-            failure_states,
-            label_selectors,
+            {
+                "failureTexts": failure_texts,
+                "failureStates": failure_states,
+                "labelSelectors": label_selectors,
+            },
         )
         return [str(identifier) for identifier in failed]
 
