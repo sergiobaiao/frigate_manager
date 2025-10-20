@@ -252,6 +252,21 @@ async def _detect_failed_cameras(page) -> List[str]:
                                 }
                             }
                         }
+
+                        if (node.parentElement) {
+                            node = node.parentElement;
+                            continue;
+                        }
+                        if (node.assignedSlot) {
+                            node = node.assignedSlot;
+                            continue;
+                        }
+                        const root = node.getRootNode ? node.getRootNode() : null;
+                        if (root && root.host) {
+                            node = root.host;
+                            continue;
+                        }
+                        break;
                     }
                     if (!identifier) {
                         identifier = `camera-${index + 1}`;
