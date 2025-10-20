@@ -128,19 +128,55 @@ def _read_text_from_image(image_bytes: bytes, backend: str) -> str:
     return ""
 
 
-async def _extract_text_via_ocr(page, container_id: str, backend: str) -> str:
+async def _capture_container_image(page, container_id: str) -> Optional[bytes]:
     selector = f'[data-fm-detector-id="{container_id}"]'
     handle = await page.query_selector(selector)
     if not handle:
-        return ""
+        return None
 
     try:
         await handle.scroll_into_view_if_needed()
-        image_bytes = await handle.screenshot(type="png")
+        return await handle.screenshot(type="png")
     except Exception as exc:  # pragma: no cover - runtime protection
-        logger.debug("Unable to capture screenshot for OCR (%s): %s", selector, exc)
-        return ""
+        logger.debug("Unable to capture screenshot for analysis (%s): %s", selector, exc)
+        return None
 
+
+def _detect_placeholder_frame(image_bytes: bytes) -> Optional[bool]:
+    try:
+        from PIL import Image  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dependency
+        logger.debug("Pillow is required for placeholder detection: %s", exc)
+        return None
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            grayscale = image.convert("L")
+            histogram = grayscale.histogram()
+    except Exception as exc:  # pragma: no cover - runtime protection
+        logger.debug("Unable to analyze image for placeholder detection: %s", exc)
+        return None
+
+    total = sum(histogram)
+    if total <= 0:
+        return None
+
+    dark_count = sum(histogram[:32])
+    bright_count = sum(histogram[200:])
+    mean_intensity = sum(index * count for index, count in enumerate(histogram)) / total
+
+    dark_ratio = dark_count / total
+    bright_ratio = bright_count / total
+
+    if dark_ratio >= 0.9 and bright_ratio <= 0.05 and mean_intensity <= 40:
+        return True
+    return False
+
+
+async def _extract_text_via_ocr(page, container_id: str, backend: str) -> str:
+    image_bytes = await _capture_container_image(page, container_id)
+    if not image_bytes:
+        return ""
     return await asyncio.to_thread(_read_text_from_image, image_bytes, backend)
 
 
@@ -239,11 +275,14 @@ async def _detect_failed_cameras(page) -> List[str]:
     failure_texts = [
         "no frames have been received",
         "no frames received",
+        "check error logs",
+        "error logs",
         "camera offline",
         "camera is offline",
         "unable to load camera",
         "disconnected",
         "lost connection",
+        "no signal",
     ]
     failure_image_hints = [
         "no-frame",
@@ -363,26 +402,102 @@ async def _detect_failed_cameras(page) -> List[str]:
                     return null;
                 };
 
+                const isVisibleElement = (element) => {
+                    if (!element || typeof element !== 'object') {
+                        return false;
+                    }
+                    try {
+                        if (element.classList && element.classList.contains('invisible')) {
+                            return false;
+                        }
+                        const style = window.getComputedStyle(element);
+                        if (style) {
+                            const visibility = style.getPropertyValue('visibility');
+                            const display = style.getPropertyValue('display');
+                            const opacity = parseFloat(style.getPropertyValue('opacity') || '1');
+                            if (visibility === 'hidden' || display === 'none' || opacity <= 0.05) {
+                                return false;
+                            }
+                        }
+                        if (element.getBoundingClientRect) {
+                            const rect = element.getBoundingClientRect();
+                            if (!rect || rect.width <= 1 || rect.height <= 1) {
+                                return false;
+                            }
+                        }
+                    } catch (error) {
+                        return true;
+                    }
+                    return true;
+                };
+
                 const hasFailureBackground = (element) => {
                     if (!element || element.nodeType !== Node.ELEMENT_NODE) {
                         return null;
                     }
-                    const style = window.getComputedStyle(element);
-                    if (!style) {
-                        return null;
-                    }
-                    const backgroundImage = style.getPropertyValue('background-image');
-                    if (!backgroundImage) {
-                        return null;
-                    }
-                    const lower = backgroundImage.toLowerCase();
-                    for (const hint of normalizedImageHints) {
-                        if (lower.includes(hint)) {
-                            return hint;
+                    try {
+                        const style = window.getComputedStyle(element);
+                        if (!style) {
+                            return null;
                         }
+                        const backgroundImage = style.getPropertyValue('background-image');
+                        if (!backgroundImage) {
+                            return null;
+                        }
+                        const lower = backgroundImage.toLowerCase();
+                        for (const hint of normalizedImageHints) {
+                            if (lower.includes(hint)) {
+                                return hint;
+                            }
+                        }
+                    } catch (error) {
+                        return null;
                     }
                     return null;
                 };
+
+                const deepVisit = (root, callback) => {
+                    if (!root) {
+                        return;
+                    }
+                    const stack = [root];
+                    const visited = new Set();
+                    while (stack.length > 0) {
+                        const node = stack.pop();
+                        if (!node || visited.has(node)) {
+                            continue;
+                        }
+                        visited.add(node);
+
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            callback(node);
+
+                            if (node.shadowRoot) {
+                                stack.push(node.shadowRoot);
+                            }
+
+                            if (node.tagName === 'SLOT') {
+                                const assigned = node.assignedNodes
+                                    ? node.assignedNodes({ flatten: true })
+                                    : [];
+                                for (let i = assigned.length - 1; i >= 0; i -= 1) {
+                                    stack.push(assigned[i]);
+                                }
+                            }
+                        }
+
+                        if (node.childNodes) {
+                            for (let i = node.childNodes.length - 1; i >= 0; i -= 1) {
+                                stack.push(node.childNodes[i]);
+                            }
+                        }
+                    }
+                };
+
+                const allElements = [];
+                deepVisit(document, (element) => {
+                    allElements.push(element);
+                });
 
                 const labelMap = new Map();
                 const potentialContainers = new Set();
@@ -392,13 +507,15 @@ async def _detect_failed_cameras(page) -> List[str]:
                     while (node) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
                             const element = node;
-                            if (containerSelectors.some((selector) => {
-                                try {
-                                    return element.matches(selector);
-                                } catch (error) {
-                                    return false;
-                                }
-                            })) {
+                            if (
+                                containerSelectors.some((selector) => {
+                                    try {
+                                        return element.matches(selector);
+                                    } catch (error) {
+                                        return false;
+                                    }
+                                })
+                            ) {
                                 return element;
                             }
                         }
@@ -474,17 +591,47 @@ async def _detect_failed_cameras(page) -> List[str]:
                     } catch (error) {
                         // Ignore invalid selectors
                     }
-                }
+                    return null;
+                };
 
-                for (const selector of containerSelectors) {
-                    try {
-                        document.querySelectorAll(selector).forEach((container) => {
-                            potentialContainers.add(container);
-                        });
-                    } catch (error) {
-                        // Ignore invalid selectors
+                allElements.forEach((element) => {
+                    for (const selector of labelSelectors) {
+                        try {
+                            if (!element.matches(selector)) {
+                                continue;
+                            }
+                        } catch (error) {
+                            continue;
+                        }
+                        const container = findCandidateContainer(element);
+                        if (!container) {
+                            continue;
+                        }
+                        potentialContainers.add(container);
+                        const textContent = element.textContent ? element.textContent.trim() : '';
+                        if (textContent) {
+                            const existing = labelMap.get(container) || [];
+                            if (!existing.includes(textContent)) {
+                                existing.push(textContent);
+                                labelMap.set(container, existing);
+                            }
+                        }
+                        break;
                     }
-                }
+                });
+
+                allElements.forEach((element) => {
+                    for (const selector of containerSelectors) {
+                        try {
+                            if (element.matches(selector)) {
+                                potentialContainers.add(element);
+                                break;
+                            }
+                        } catch (error) {
+                            continue;
+                        }
+                    }
+                });
 
                 const containers = Array.from(potentialContainers).filter(
                     (el) => el && el.nodeType === Node.ELEMENT_NODE,
@@ -496,19 +643,34 @@ async def _detect_failed_cameras(page) -> List[str]:
                     if (!root) {
                         return;
                     }
-                    const walker = document.createTreeWalker(
-                        root,
-                        NodeFilter.SHOW_ELEMENT,
-                        null,
-                        false,
-                    );
-                    let current = walker.currentNode;
-                    while (current) {
-                        const element = current;
+                    const stack = [root];
+                    const inspected = new Set();
+                    while (stack.length > 0) {
+                        const node = stack.pop();
+                        if (!node || inspected.has(node)) {
+                            continue;
+                        }
+                        inspected.add(node);
+
+                        if (node.nodeType !== Node.ELEMENT_NODE) {
+                            if (node.childNodes) {
+                                for (let i = node.childNodes.length - 1; i >= 0; i -= 1) {
+                                    stack.push(node.childNodes[i]);
+                                }
+                            }
+                            continue;
+                        }
+
+                        const element = node;
+
                         if (!info.hasVisualContent) {
                             const tagName = element.tagName || '';
                             if (['IMG', 'CANVAS', 'VIDEO', 'PICTURE', 'SVG'].includes(tagName)) {
-                                info.hasVisualContent = true;
+                                if (isVisibleElement(element)) {
+                                    info.hasVisualContent = true;
+                                } else {
+                                    pushUnique(info.hiddenVisuals, tagName.toLowerCase());
+                                }
                             }
                         }
 
@@ -531,18 +693,26 @@ async def _detect_failed_cameras(page) -> List[str]:
                             const ariaLabel = element.getAttribute('aria-label');
                             if (isFailureText(ariaLabel)) {
                                 pushUnique(info.textMatches, ariaLabel.trim().slice(0, 160));
+                            } else if (ariaLabel && ariaLabel.toLowerCase().includes('loading')) {
+                                pushUnique(info.stateMatches, `aria:${ariaLabel.trim().slice(0, 80)}`);
                             }
                             const ariaDescription = element.getAttribute('aria-description');
                             if (isFailureText(ariaDescription)) {
                                 pushUnique(info.textMatches, ariaDescription.trim().slice(0, 160));
+                            } else if (ariaDescription && ariaDescription.toLowerCase().includes('loading')) {
+                                pushUnique(info.stateMatches, `aria:${ariaDescription.trim().slice(0, 80)}`);
                             }
                             const labelledBy = ariaLabelFromIds(element, 'aria-labelledby');
                             if (isFailureText(labelledBy)) {
                                 pushUnique(info.textMatches, labelledBy.slice(0, 160));
+                            } else if (labelledBy && labelledBy.toLowerCase().includes('loading')) {
+                                pushUnique(info.stateMatches, `aria:${labelledBy.slice(0, 80)}`);
                             }
                             const describedBy = ariaLabelFromIds(element, 'aria-describedby');
                             if (isFailureText(describedBy)) {
                                 pushUnique(info.textMatches, describedBy.slice(0, 160));
+                            } else if (describedBy && describedBy.toLowerCase().includes('loading')) {
+                                pushUnique(info.stateMatches, `aria:${describedBy.slice(0, 80)}`);
                             }
                             const titleAttr = element.getAttribute('title');
                             if (isFailureText(titleAttr)) {
@@ -579,18 +749,34 @@ async def _detect_failed_cameras(page) -> List[str]:
                                 if (normalizedStates.includes(cls.toLowerCase())) {
                                     pushUnique(info.stateMatches, `class:${cls}`);
                                 }
+                                if (cls.toLowerCase().includes('spin')) {
+                                    pushUnique(info.stateMatches, `spinner:${cls}`);
+                                }
                             });
                         }
 
                         if (element.shadowRoot) {
-                            inspectElement(element.shadowRoot, info);
+                            stack.push(element.shadowRoot);
                         }
 
                         if (element.tagName === 'IFRAME' && element.contentDocument) {
-                            inspectElement(element.contentDocument, info);
+                            stack.push(element.contentDocument);
                         }
 
-                        current = walker.nextNode();
+                        if (element.tagName === 'SLOT') {
+                            const assigned = element.assignedNodes
+                                ? element.assignedNodes({ flatten: true })
+                                : [];
+                            for (let i = assigned.length - 1; i >= 0; i -= 1) {
+                                stack.push(assigned[i]);
+                            }
+                        }
+
+                        if (element.childNodes) {
+                            for (let i = element.childNodes.length - 1; i >= 0; i -= 1) {
+                                stack.push(element.childNodes[i]);
+                            }
+                        }
                     }
                 };
 
@@ -603,7 +789,7 @@ async def _detect_failed_cameras(page) -> List[str]:
                     const labelTexts = [];
                     const mapped = labelMap.get(container) || [];
                     mapped.forEach((text) => pushUnique(labelTexts, text));
-                    for (const selector of labelSelectors) {
+                    labelSelectors.forEach((selector) => {
                         try {
                             container.querySelectorAll(selector).forEach((label) => {
                                 if (label && label.textContent) {
@@ -613,7 +799,7 @@ async def _detect_failed_cameras(page) -> List[str]:
                         } catch (error) {
                             // Ignore invalid selectors
                         }
-                    }
+                    });
 
                     let identifier = '';
                     if (container.dataset) {
@@ -658,22 +844,16 @@ async def _detect_failed_cameras(page) -> List[str]:
                         stateMatches: [],
                         imageHints: [],
                         hasVisualContent: false,
+                        hiddenVisuals: [],
                     };
 
                     inspectElement(container, info);
 
                     if (!info.hasVisualContent) {
-                        try {
-                            const style = window.getComputedStyle(container);
-                            if (
-                                style &&
-                                style.getPropertyValue('background-image') &&
-                                style.getPropertyValue('background-image') !== 'none'
-                            ) {
-                                info.hasVisualContent = true;
-                            }
-                        } catch (error) {
-                            // Ignore getComputedStyle errors
+                        const backgroundHint = hasFailureBackground(container);
+                        if (backgroundHint) {
+                            info.hasVisualContent = true;
+                            pushUnique(info.imageHints, `background:${backgroundHint}`);
                         }
                     }
 
@@ -691,7 +871,6 @@ async def _detect_failed_cameras(page) -> List[str]:
                 "containerSelectors": container_selectors,
             },
         )
-
         if not isinstance(result, list):
             return []
         return result
@@ -699,6 +878,11 @@ async def _detect_failed_cameras(page) -> List[str]:
     attempts = 10
     delay_ms = 1000
     last_result: List[str] = []
+    hidden_visual_counts: Dict[str, int] = {}
+    hidden_visual_threshold = 6
+    placeholder_counts: Dict[str, int] = {}
+    placeholder_start_attempt = 4
+    placeholder_threshold = 3
     for attempt in range(attempts):
         scan_results = await _scan_once()
         seen_identifiers: set[str] = set()
@@ -711,7 +895,15 @@ async def _detect_failed_cameras(page) -> List[str]:
                 continue
 
             text_matches = entry.get("textMatches") or []
-            state_matches = entry.get("stateMatches") or []
+            raw_state_matches = entry.get("stateMatches") or []
+            spinner_matches = [
+                state
+                for state in raw_state_matches
+                if "spinner" in state.lower() or "loading" in state.lower()
+            ]
+            state_matches = [
+                state for state in raw_state_matches if state not in spinner_matches
+            ]
 
             if text_matches or state_matches:
                 if identifier not in seen_identifiers:
@@ -720,41 +912,102 @@ async def _detect_failed_cameras(page) -> List[str]:
                 continue
 
             if entry.get("hasVisualContent"):
+                hidden_visual_counts.pop(identifier, None)
+            else:
+                hidden_visuals = entry.get("hiddenVisuals") or []
+                if (hidden_visuals or spinner_matches) and attempt >= 2:
+                    count = hidden_visual_counts.get(identifier, 0) + 1
+                    hidden_visual_counts[identifier] = count
+                    if count >= hidden_visual_threshold and identifier not in seen_identifiers:
+                        seen_identifiers.add(identifier)
+                        failures.append(identifier)
+                        logger.debug(
+                            "Detected failed camera due to missing visual content (%s): hidden=%s states=%s",
+                            identifier,
+                            ",".join(str(item) for item in hidden_visuals[:5]) or "none",
+                            ",".join(spinner_matches[:5]) or "none",
+                        )
+                        continue
+                else:
+                    hidden_visual_counts.pop(identifier, None)
+
+            if entry.get("containerId"):
                 ocr_candidates.append(entry)
 
         if ocr_candidates:
             backend = _ensure_ocr_backend()
-            if backend:
-                prioritized: List[Dict[str, Any]] = []
-                prioritized.extend(
-                    [candidate for candidate in ocr_candidates if candidate.get("imageHints")]
-                )
-                prioritized.extend(
-                    [candidate for candidate in ocr_candidates if not candidate.get("imageHints")]
-                )
+            prioritized: List[Dict[str, Any]] = []
+            prioritized.extend(
+                [candidate for candidate in ocr_candidates if candidate.get("imageHints")]
+            )
+            prioritized.extend(
+                [candidate for candidate in ocr_candidates if not candidate.get("imageHints")]
+            )
 
-                seen_containers: set[str] = set()
-                for candidate in prioritized:
-                    container_id = candidate.get("containerId")
-                    if not container_id or container_id in seen_containers:
-                        continue
-                    seen_containers.add(container_id)
+            seen_containers: set[str] = set()
+            for candidate in prioritized:
+                container_id = candidate.get("containerId")
+                if not container_id or container_id in seen_containers:
+                    continue
+                seen_containers.add(container_id)
 
-                    text = await _extract_text_via_ocr(page, container_id, backend)
-                    if not text:
-                        continue
+                image_bytes = await _capture_container_image(page, container_id)
+                if not image_bytes:
+                    continue
 
-                    if _contains_failure_text(text, failure_texts):
-                        identifier = str(candidate.get("identifier") or "").strip()
-                        if identifier and identifier not in seen_identifiers:
+                placeholder = _detect_placeholder_frame(image_bytes)
+                identifier = str(candidate.get("identifier") or "").strip()
+                if placeholder and identifier:
+                    if attempt >= placeholder_start_attempt:
+                        count = placeholder_counts.get(identifier, 0) + 1
+                        placeholder_counts[identifier] = count
+                        if count >= placeholder_threshold and identifier not in seen_identifiers:
                             seen_identifiers.add(identifier)
                             failures.append(identifier)
                             logger.debug(
-                                "Detected failed camera via OCR (%s): %s",
+                                "Detected failed camera via placeholder analysis (%s)",
                                 identifier,
-                                text.replace("\n", " ").strip(),
                             )
-            else:
+                            continue
+                elif identifier and identifier in placeholder_counts:
+                    placeholder_counts.pop(identifier, None)
+
+                if not backend:
+                    continue
+
+                text = await asyncio.to_thread(_read_text_from_image, image_bytes, backend)
+                if not text:
+                    continue
+
+                cleaned_text = text.replace("\n", " ").strip()
+
+                if _contains_failure_text(cleaned_text, failure_texts):
+                    identifier = str(candidate.get("identifier") or "").strip()
+                    if identifier and identifier not in seen_identifiers:
+                        seen_identifiers.add(identifier)
+                        failures.append(identifier)
+                        logger.debug(
+                            "Detected failed camera via OCR (%s): %s",
+                            identifier,
+                            cleaned_text[:240],
+                        )
+                else:
+                    identifier = str(candidate.get("identifier") or "").strip()
+                    label_texts = candidate.get("labelTexts") or []
+                    if identifier:
+                        logger.debug(
+                            "OCR text for %s did not match failure keywords: %s",
+                            identifier,
+                            cleaned_text[:240],
+                        )
+                    elif label_texts:
+                        logger.debug(
+                            "OCR text for camera labeled %s did not match failure keywords: %s",
+                            ", ".join(str(label) for label in label_texts),
+                            cleaned_text[:240],
+                        )
+
+            if not backend:
                 logger.debug(
                     "Skipping OCR-based camera failure detection because no backend is available",
                 )
