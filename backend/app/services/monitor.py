@@ -32,10 +32,12 @@ _OCR_BACKEND_LOCK = threading.Lock()
 _OCR_BACKEND: Optional[str] = None
 _OCR_BACKEND_ERROR: Optional[str] = None
 _PYTESSERACT: Any = None
+_EASYOCR: Any = None
+_EASYOCR_READER: Any = None
 
 
 def _ensure_ocr_backend() -> Optional[str]:
-    global _OCR_BACKEND, _OCR_BACKEND_ERROR, _PYTESSERACT
+    global _OCR_BACKEND, _OCR_BACKEND_ERROR, _PYTESSERACT, _EASYOCR, _EASYOCR_READER
 
     if _OCR_BACKEND is not None or _OCR_BACKEND_ERROR is not None:
         return _OCR_BACKEND
@@ -44,42 +46,85 @@ def _ensure_ocr_backend() -> Optional[str]:
         if _OCR_BACKEND is not None or _OCR_BACKEND_ERROR is not None:
             return _OCR_BACKEND
 
+        backend_errors: List[str] = []
+
         try:  # pragma: no cover - exercised in integration tests
             import pytesseract  # type: ignore
 
             pytesseract.get_tesseract_version()
             _PYTESSERACT = pytesseract
             _OCR_BACKEND = "pytesseract"
+            logger.debug("Using pytesseract for camera failure OCR checks")
             return _OCR_BACKEND
         except Exception as exc:  # pragma: no cover - optional dependency
-            logger.error(
-                "Camera failure detection OCR backend unavailable: %s",
+            backend_errors.append(f"pytesseract: {exc}")
+            logger.info(
+                "pytesseract OCR backend unavailable for camera checks: %s",
                 exc,
             )
-            _OCR_BACKEND_ERROR = str(exc)
+
+        try:  # pragma: no cover - optional dependency
+            import easyocr  # type: ignore
+
+            _EASYOCR = easyocr
+            _EASYOCR_READER = easyocr.Reader(["en"], gpu=False)
+            _OCR_BACKEND = "easyocr"
+            logger.info("Falling back to easyocr for camera failure OCR checks")
+            return _OCR_BACKEND
+        except Exception as exc:  # pragma: no cover - optional dependency
+            backend_errors.append(f"easyocr: {exc}")
+            logger.error(
+                "Camera failure detection OCR backends unavailable: %s",
+                "; ".join(backend_errors),
+            )
+            _OCR_BACKEND_ERROR = "; ".join(backend_errors)
             return None
 
 
 def _read_text_from_image(image_bytes: bytes, backend: str) -> str:
-    if backend != "pytesseract" or _PYTESSERACT is None:
-        return ""
-
     try:
         from PIL import Image, ImageFilter, ImageOps  # type: ignore
     except Exception as exc:  # pragma: no cover - optional dependency
         logger.error("Pillow is required for OCR image handling: %s", exc)
         return ""
 
-    try:
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            grayscale = image.convert("L")
-            enhanced = ImageOps.autocontrast(grayscale)
-            enhanced = ImageOps.equalize(enhanced)
-            enhanced = enhanced.filter(ImageFilter.SHARPEN)
-            text = _PYTESSERACT.image_to_string(enhanced)
-            return " ".join(text.split())
-    except Exception as exc:  # pragma: no cover - runtime protection
-        logger.debug("OCR extraction failed: %s", exc)
+    if backend == "pytesseract" and _PYTESSERACT is not None:
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                grayscale = image.convert("L")
+                enhanced = ImageOps.autocontrast(grayscale)
+                enhanced = ImageOps.equalize(enhanced)
+                enhanced = enhanced.filter(ImageFilter.SHARPEN)
+                text = _PYTESSERACT.image_to_string(enhanced)
+                return " ".join(text.split())
+        except Exception as exc:  # pragma: no cover - runtime protection
+            logger.debug("OCR extraction failed (pytesseract): %s", exc)
+        return ""
+
+    if backend == "easyocr" and _EASYOCR_READER is not None:
+        try:
+            import numpy as np  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            logger.error("NumPy is required for easyocr image handling: %s", exc)
+            return ""
+
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                normalized = ImageOps.autocontrast(image.convert("RGB"))
+                array = np.array(normalized)
+        except Exception as exc:  # pragma: no cover - runtime protection
+            logger.debug("Unable to prepare image for easyocr: %s", exc)
+            return ""
+
+        try:
+            results = _EASYOCR_READER.readtext(array, detail=0)
+        except Exception as exc:  # pragma: no cover - runtime protection
+            logger.debug("easyocr extraction failed: %s", exc)
+            return ""
+
+        combined = " ".join(str(item) for item in results)
+        return " ".join(combined.split())
+
     return ""
 
 
@@ -384,6 +429,28 @@ async def _detect_failed_cameras(page) -> List[str]:
                             continue;
                         }
                         break;
+                    }
+                    return null;
+                };
+
+                for (const selector of labelSelectors) {
+                    try {
+                        document.querySelectorAll(selector).forEach((label) => {
+                            const container = findCandidateContainer(label);
+                            if (container) {
+                                potentialContainers.add(container);
+                                const textContent = label.textContent ? label.textContent.trim() : '';
+                                if (textContent) {
+                                    const existing = labelMap.get(container) || [];
+                                    if (!existing.includes(textContent)) {
+                                        existing.push(textContent);
+                                        labelMap.set(container, existing);
+                                    }
+                                }
+                            }
+                        });
+                    } catch (error) {
+                        // Ignore invalid selectors
                     }
                     return null;
                 };
