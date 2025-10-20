@@ -43,6 +43,7 @@ export type Config = {
   MENTION_NAME: string;
   CHECK_INTERVAL_MINUTES: number;
   RETRY_DELAY_MINUTES: number;
+  DEBUG_MODE: boolean;
 };
 
 export const fetchHosts = async (): Promise<Host[]> => {

@@ -8,5 +8,13 @@ CONFIG_PATH = DATA_DIR / "config" / "config.json"
 DB_PATH = DATA_DIR / "monitor.db"
 LOG_DIR = DATA_DIR / "logs"
 SCREENSHOT_DIR = DATA_DIR / "screenshots"
+TRACE_DIR = DATA_DIR / "traces"
 
-__all__ = ["DATA_DIR", "CONFIG_PATH", "DB_PATH", "LOG_DIR", "SCREENSHOT_DIR"]
+__all__ = [
+    "DATA_DIR",
+    "CONFIG_PATH",
+    "DB_PATH",
+    "LOG_DIR",
+    "SCREENSHOT_DIR",
+    "TRACE_DIR",
+]

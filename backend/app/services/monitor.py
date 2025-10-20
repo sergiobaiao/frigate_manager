@@ -20,7 +20,7 @@ from ..services.logs import (
     save_log_file,
 )
 from ..services.notifications import send_media, send_message
-from ..utils.paths import LOG_DIR, SCREENSHOT_DIR
+from ..utils.paths import LOG_DIR, SCREENSHOT_DIR, TRACE_DIR
 from ..utils.timezone import now_tz
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,39 @@ async def _fetch_page_screenshot(page, output_path: Path) -> str:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     await page.screenshot(path=str(output_path), full_page=True)
     return str(output_path)
+
+
+async def _start_tracing(context, recorder: Optional["HostCheckRecorder"], label: str) -> bool:
+    try:
+        await context.tracing.start(screenshots=True, snapshots=True, sources=True)
+    except Exception as exc:  # pragma: no cover - optional feature
+        logger.warning("Unable to start Playwright tracing (%s): %s", label, exc)
+        if recorder:
+            recorder.log(f"Unable to start Playwright tracing ({label}): {exc}")
+        return False
+    if recorder:
+        recorder.log(f"Playwright tracing enabled for {label} run")
+    return True
+
+
+async def _stop_tracing(
+    context,
+    output_path: Path,
+    recorder: Optional["HostCheckRecorder"],
+    label: str,
+) -> Optional[str]:
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        await context.tracing.stop(path=str(output_path))
+    except Exception as exc:  # pragma: no cover - optional feature
+        logger.warning("Unable to persist Playwright trace (%s): %s", label, exc)
+        if recorder:
+            recorder.log(f"Failed to save Playwright trace ({label}): {exc}")
+        return None
+    saved_path = str(output_path)
+    if recorder:
+        recorder.log(f"Saved Playwright trace for {label} run to {saved_path}")
+    return saved_path
 
 
 async def _detect_failed_cameras(page) -> List[str]:
@@ -266,11 +299,16 @@ async def check_host(
     hostname = host.name
     first_screenshot: Optional[str] = None
     second_screenshot: Optional[str] = None
+    trace_files: List[str] = []
+    debug_mode = getattr(config, "debug_mode", False)
+    if recorder and debug_mode:
+        recorder.log("Debug mode enabled: additional Playwright traces will be captured")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
         console_messages: List[str] = []
+        initial_trace_started = False
 
         if recorder:
             def _capture_console(message) -> None:
@@ -280,6 +318,8 @@ async def check_host(
                     del console_messages[0]
 
             page.on("console", _capture_console)
+        if debug_mode:
+            initial_trace_started = await _start_tracing(context, recorder, "initial")
         if recorder:
             recorder.log("Loading Frigate dashboard")
         try:
@@ -288,6 +328,10 @@ async def check_host(
             logger.exception("Failed to load Frigate host %s: %s", host.base_url, exc)
             if recorder:
                 recorder.log(f"Failed to load dashboard: {exc}")
+            if debug_mode and initial_trace_started:
+                trace_path = TRACE_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial-trace.zip"
+                if saved := await _stop_tracing(context, trace_path, recorder, "initial"):
+                    trace_files.append(saved)
             await context.close()
             await browser.close()
             return {
@@ -301,6 +345,10 @@ async def check_host(
                 f"Initial scan detected {len(initial_failed)} failing cameras via dashboard inspection"
             )
         if not initial_failed:
+            if debug_mode and initial_trace_started:
+                trace_path = TRACE_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial-trace.zip"
+                if saved := await _stop_tracing(context, trace_path, recorder, "initial"):
+                    trace_files.append(saved)
             await context.close()
             await browser.close()
             return {
@@ -318,6 +366,10 @@ async def check_host(
                 if preview
                 else "No browser console output captured"
             )
+        if debug_mode and initial_trace_started:
+            trace_path = TRACE_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial-trace.zip"
+            if saved := await _stop_tracing(context, trace_path, recorder, "initial"):
+                trace_files.append(saved)
         await context.close()
         await browser.close()
 
@@ -330,6 +382,7 @@ async def check_host(
         context = await browser.new_context()
         page = await context.new_page()
         retry_console_messages: List[str] = []
+        retry_trace_started = False
 
         if recorder:
             def _capture_retry_console(message) -> None:
@@ -339,6 +392,8 @@ async def check_host(
                     del retry_console_messages[0]
 
             page.on("console", _capture_retry_console)
+        if debug_mode:
+            retry_trace_started = await _start_tracing(context, recorder, "retry")
         if recorder:
             recorder.log("Retrying Frigate dashboard after delay")
         try:
@@ -347,6 +402,10 @@ async def check_host(
             logger.exception("Failed to load Frigate host on retry %s: %s", host.base_url, exc)
             if recorder:
                 recorder.log(f"Retry failed to load dashboard: {exc}")
+            if debug_mode and retry_trace_started:
+                retry_trace_path = TRACE_DIR / f"{hostname}-{now_tz(timezone).strftime('%Y%m%dT%H%M%S')}-retry-trace.zip"
+                if saved := await _stop_tracing(context, retry_trace_path, recorder, "retry"):
+                    trace_files.append(saved)
             await context.close()
             await browser.close()
             return {
@@ -370,6 +429,10 @@ async def check_host(
                 if retry_preview
                 else "No browser console output captured on retry"
             )
+        if debug_mode and retry_trace_started:
+            retry_trace_path = TRACE_DIR / f"{hostname}-{retry_timestamp.strftime('%Y%m%dT%H%M%S')}-retry-trace.zip"
+            if saved := await _stop_tracing(context, retry_trace_path, recorder, "retry"):
+                trace_files.append(saved)
         await context.close()
         await browser.close()
 
@@ -414,6 +477,9 @@ async def check_host(
                 recorder.log(
                     f"Saved {service} logs to {path}" if content else f"No {service} log content retrieved"
                 )
+
+    if trace_files:
+        log_files.extend(trace_files)
 
     failure_start = None
     for service in services:

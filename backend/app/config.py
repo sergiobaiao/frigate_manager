@@ -18,6 +18,7 @@ class AppConfig(BaseModel):
     mention_name: str = Field("", alias="MENTION_NAME")
     check_interval_minutes: int = Field(10, alias="CHECK_INTERVAL_MINUTES")
     retry_delay_minutes: int = Field(5, alias="RETRY_DELAY_MINUTES")
+    debug_mode: bool = Field(False, alias="DEBUG_MODE")
 
     class Config:
         allow_population_by_field_name = True
