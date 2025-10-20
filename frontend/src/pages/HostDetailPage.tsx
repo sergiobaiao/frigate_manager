@@ -237,7 +237,8 @@ const HostDetailPage = () => {
             ) : (
               <p style={{ color: '#9ca3af' }}>
                 No log files available yet. Captured logs will be listed here and can also be found in{' '}
-                <code>data/logs</code>.
+                <code>data/logs</code>. Trace archives generated while debug mode is enabled are stored under{' '}
+                <code>data/traces</code>.
               </p>
             )}
           </div>

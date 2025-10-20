@@ -102,6 +102,22 @@ const SettingsPage = () => {
             />
           </div>
         </div>
+        <div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <input
+              type="checkbox"
+              checked={formState.DEBUG_MODE ?? config?.DEBUG_MODE ?? false}
+              onChange={(event) =>
+                setFormState((prev) => ({ ...prev, DEBUG_MODE: event.target.checked }))
+              }
+            />
+            Enable debug mode
+          </label>
+          <p className="hint-text" style={{ marginTop: '0.25rem' }}>
+            When enabled, Frigate Manager stores Playwright trace files for each check so you can
+            review the exact browser actions under <code>data/traces</code>.
+          </p>
+        </div>
         <button type="submit" className="action-button" disabled={mutation.isPending}>
           {mutation.isPending ? 'Saving…' : 'Save configuration'}
         </button>

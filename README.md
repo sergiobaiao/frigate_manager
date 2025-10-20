@@ -39,6 +39,7 @@ Os arquivos de configuração, histórico e logs são mapeados para a pasta `./d
 - Token, chat e usuários mencionados no Telegram.
 - Filtro de contêiner, menções e identificadores de chat.
 - Intervalo entre verificações e atraso do reteste.
+- Modo debug opcional para capturar traces detalhados do Playwright.
 - Hosts monitorados (nome, endereço e status).
 
 ## Desenvolvimento local
@@ -75,3 +76,4 @@ Defina `VITE_API_URL` para apontar a API desejada durante o desenvolvimento, cas
 - Todos os horários registrados são normalizados para GMT-3.
 - As rotinas de monitoramento são executadas de forma assíncrona pelo APScheduler, sem bloquear a API.
 - Logs brutos são armazenados em disco e também indexados no SQLite para pesquisa via dashboard.
+- Screenshots ficam em `data/screenshots`, logs em `data/logs` e, quando o modo debug está ativo, os arquivos de trace do Playwright são gravados em `data/traces`.

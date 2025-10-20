@@ -11,6 +11,7 @@ class ConfigRead(BaseModel):
     MENTION_NAME: str
     CHECK_INTERVAL_MINUTES: int
     RETRY_DELAY_MINUTES: int
+    DEBUG_MODE: bool
 
 
 class ConfigUpdate(BaseModel):
@@ -21,4 +22,5 @@ class ConfigUpdate(BaseModel):
     MENTION_NAME: str | None = None
     CHECK_INTERVAL_MINUTES: int | None = None
     RETRY_DELAY_MINUTES: int | None = None
+    DEBUG_MODE: bool | None = None
 
