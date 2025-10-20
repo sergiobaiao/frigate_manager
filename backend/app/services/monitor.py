@@ -76,10 +76,7 @@ async def _detect_failed_cameras(page) -> List[str]:
     failed = await page.evaluate(
         """
         () => {
-            const failureText = "No frames have been received, check error logs";
-            const matches = Array.from(document.querySelectorAll('*')).filter(
-                (el) => el.textContent && el.textContent.includes(failureText)
-            );
+            const failureText = "no frames have been received";
             const identifiers = [];
             const seen = new Set();
             const labelSelectors = [
@@ -87,6 +84,8 @@ async def _detect_failed_cameras(page) -> List[str]:
                 '.camera-title',
                 '.title',
                 '.camera-header',
+                '[data-camera-name]',
+                '[data-testid="camera-name"]',
                 'header h1',
                 'header h2',
                 'h1',
@@ -97,22 +96,88 @@ async def _detect_failed_cameras(page) -> List[str]:
                 'h6',
                 'figcaption',
             ];
+
+            const collectMatches = (root, matches) => {
+                const walker = document.createTreeWalker(
+                    root,
+                    NodeFilter.SHOW_ELEMENT,
+                    null,
+                    false,
+                );
+                let current = walker.currentNode;
+                while (current) {
+                    const el = current;
+                    const text = (el.innerText || el.textContent || '').toLowerCase();
+                    if (text && text.includes(failureText)) {
+                        matches.push(el);
+                    }
+                    if (el.shadowRoot) {
+                        collectMatches(el.shadowRoot, matches);
+                    }
+                    current = walker.nextNode();
+                }
+            };
+
+            const findCandidateContainer = (start) => {
+                let node = start;
+                while (node) {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const element = node;
+                        if (
+                            element.matches(
+                                '[data-camera], [data-camera-id], article, section, figure, div'
+                            )
+                        ) {
+                            return element;
+                        }
+                    }
+                    if (node.parentElement) {
+                        node = node.parentElement;
+                        continue;
+                    }
+                    if (node.assignedSlot) {
+                        node = node.assignedSlot;
+                        continue;
+                    }
+                    const root = node.getRootNode ? node.getRootNode() : null;
+                    if (root && root.host) {
+                        node = root.host;
+                        continue;
+                    }
+                    break;
+                }
+                return null;
+            };
+
+            const matches = [];
+            collectMatches(document, matches);
+
             matches.forEach((el, index) => {
-                const card = el.closest('[data-camera], article, section, figure, div');
+                const card = findCandidateContainer(el);
                 let identifier = '';
                 if (card) {
                     const datasetCamera = card.dataset ? card.dataset.camera : null;
+                    const datasetCameraId = card.dataset ? card.dataset.cameraId : null;
                     if (datasetCamera) {
                         identifier = datasetCamera.trim();
                     }
-                    if (!identifier && card.getAttribute('data-camera')) {
-                        identifier = card.getAttribute('data-camera').trim();
+                    if (!identifier && datasetCameraId) {
+                        identifier = datasetCameraId.trim();
+                    }
+                    const directDataCamera = card.getAttribute('data-camera');
+                    if (!identifier && directDataCamera) {
+                        identifier = directDataCamera.trim();
+                    }
+                    const directDataCameraId = card.getAttribute('data-camera-id');
+                    if (!identifier && directDataCameraId) {
+                        identifier = directDataCameraId.trim();
                     }
                     if (!identifier && card.id) {
                         identifier = card.id.trim();
                     }
-                    if (!identifier && card.getAttribute('aria-label')) {
-                        identifier = card.getAttribute('aria-label').trim();
+                    const ariaLabel = card.getAttribute('aria-label');
+                    if (!identifier && ariaLabel) {
+                        identifier = ariaLabel.trim();
                     }
                     if (!identifier) {
                         for (const selector of labelSelectors) {
