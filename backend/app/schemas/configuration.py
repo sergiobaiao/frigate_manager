@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import AnyHttpUrl, BaseModel
 
 
 class ConfigRead(BaseModel):
@@ -23,4 +23,12 @@ class ConfigUpdate(BaseModel):
     CHECK_INTERVAL_MINUTES: int | None = None
     RETRY_DELAY_MINUTES: int | None = None
     DEBUG_MODE: bool | None = None
+
+
+class ScreenshotTestRequest(BaseModel):
+    url: AnyHttpUrl
+
+
+class ScreenshotTestResponse(BaseModel):
+    image_data_url: str
 

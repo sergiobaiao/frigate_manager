@@ -6,3 +6,7 @@ pydantic==1.10.13
 httpx==0.26.0
 playwright==1.41.1
 python-dotenv==1.0.1
+Pillow==10.3.0
+pytesseract==0.3.13
+numpy==1.26.4
+easyocr==1.7.1
