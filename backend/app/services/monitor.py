@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 import httpx
 from playwright.async_api import async_playwright
@@ -24,6 +26,84 @@ from ..utils.paths import LOG_DIR, SCREENSHOT_DIR, TRACE_DIR
 from ..utils.timezone import now_tz
 
 logger = logging.getLogger(__name__)
+
+
+_OCR_BACKEND_LOCK = threading.Lock()
+_OCR_BACKEND: Optional[str] = None
+_OCR_BACKEND_ERROR: Optional[str] = None
+_PYTESSERACT: Any = None
+
+
+def _ensure_ocr_backend() -> Optional[str]:
+    global _OCR_BACKEND, _OCR_BACKEND_ERROR, _PYTESSERACT
+
+    if _OCR_BACKEND is not None or _OCR_BACKEND_ERROR is not None:
+        return _OCR_BACKEND
+
+    with _OCR_BACKEND_LOCK:
+        if _OCR_BACKEND is not None or _OCR_BACKEND_ERROR is not None:
+            return _OCR_BACKEND
+
+        try:  # pragma: no cover - exercised in integration tests
+            import pytesseract  # type: ignore
+
+            pytesseract.get_tesseract_version()
+            _PYTESSERACT = pytesseract
+            _OCR_BACKEND = "pytesseract"
+            return _OCR_BACKEND
+        except Exception as exc:  # pragma: no cover - optional dependency
+            logger.error(
+                "Camera failure detection OCR backend unavailable: %s",
+                exc,
+            )
+            _OCR_BACKEND_ERROR = str(exc)
+            return None
+
+
+def _read_text_from_image(image_bytes: bytes, backend: str) -> str:
+    if backend != "pytesseract" or _PYTESSERACT is None:
+        return ""
+
+    try:
+        from PIL import Image, ImageFilter, ImageOps  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dependency
+        logger.error("Pillow is required for OCR image handling: %s", exc)
+        return ""
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            grayscale = image.convert("L")
+            enhanced = ImageOps.autocontrast(grayscale)
+            enhanced = ImageOps.equalize(enhanced)
+            enhanced = enhanced.filter(ImageFilter.SHARPEN)
+            text = _PYTESSERACT.image_to_string(enhanced)
+            return " ".join(text.split())
+    except Exception as exc:  # pragma: no cover - runtime protection
+        logger.debug("OCR extraction failed: %s", exc)
+    return ""
+
+
+async def _extract_text_via_ocr(page, container_id: str, backend: str) -> str:
+    selector = f'[data-fm-detector-id="{container_id}"]'
+    handle = await page.query_selector(selector)
+    if not handle:
+        return ""
+
+    try:
+        await handle.scroll_into_view_if_needed()
+        image_bytes = await handle.screenshot(type="png")
+    except Exception as exc:  # pragma: no cover - runtime protection
+        logger.debug("Unable to capture screenshot for OCR (%s): %s", selector, exc)
+        return ""
+
+    return await asyncio.to_thread(_read_text_from_image, image_bytes, backend)
+
+
+def _contains_failure_text(text: str, failure_texts: List[str]) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    return any(snippet in lower for snippet in failure_texts)
 
 
 class HostCheckResult(TypedDict):
@@ -90,6 +170,27 @@ async def _detect_failed_cameras(page) -> List[str]:
         'h6',
         'figcaption',
     ]
+    container_selectors = [
+        '[data-testid="camera-card"]',
+        '[data-testid="camera-tile"]',
+        '[data-testid="camera"]',
+        '[data-camera]',
+        '[data-camera-id]',
+        '[data-camera-name]',
+        '[data-testid="frigate-card-camera"]',
+        'frigate-card',
+        'frigate-card-camera',
+        'frigate-card-camera-live',
+        'frigate-card-camera-state',
+        'frigate-card-live',
+        'frigate-card-viewer',
+        '.camera-card',
+        '.camera-tile',
+        '.camera',
+        'article',
+        'section',
+        'figure',
+    ]
     failure_texts = [
         "no frames have been received",
         "no frames received",
@@ -99,98 +200,173 @@ async def _detect_failed_cameras(page) -> List[str]:
         "disconnected",
         "lost connection",
     ]
+    failure_image_hints = [
+        "no-frame",
+        "no_frame",
+        "no-frames",
+        "offline",
+        "camera-offline",
+        "camera_offline",
+        "error",
+    ]
     failure_states = ["error", "offline", "failed"]
 
-    async def _scan_once() -> List[str]:
-        failed = await page.evaluate(
+    async def _scan_once() -> List[Dict[str, Any]]:
+        result = await page.evaluate(
             """
             (args) => {
-                const { failureTexts, failureStates, labelSelectors } = args;
+                const {
+                    failureTexts,
+                    failureStates,
+                    failureImageHints,
+                    labelSelectors,
+                    containerSelectors,
+                } = args;
                 const normalizedTexts = failureTexts.map((text) => text.toLowerCase());
                 const normalizedStates = failureStates.map((state) => state.toLowerCase());
-                const identifiers = [];
-                const seen = new Set();
+                const normalizedImageHints = failureImageHints.map((hint) => hint.toLowerCase());
 
-                const matches = [];
+                const pushUnique = (array, value) => {
+                    if (value === null || value === undefined) {
+                        return;
+                    }
+                    if (typeof value === 'string') {
+                        const trimmed = value.trim();
+                        if (!trimmed) {
+                            return;
+                        }
+                        if (!array.includes(trimmed)) {
+                            array.push(trimmed);
+                        }
+                        return;
+                    }
+                    if (!array.includes(value)) {
+                        array.push(value);
+                    }
+                };
+
+                let idCounter = 0;
+                const ensureElementId = (element) => {
+                    if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+                        return null;
+                    }
+                    if (!element.dataset.fmDetectorId) {
+                        idCounter += 1;
+                        const identifier = `fm-detector-${idCounter}`;
+                        element.dataset.fmDetectorId = identifier;
+                        element.setAttribute('data-fm-detector-id', identifier);
+                    }
+                    return element.dataset.fmDetectorId;
+                };
 
                 const isFailureText = (content) => {
                     if (!content) {
                         return false;
                     }
-                    const lower = content.toLowerCase();
+                    const lower = String(content).toLowerCase();
                     return normalizedTexts.some((snippet) => lower.includes(snippet));
                 };
 
-                const registerMatch = (element) => {
-                    if (!matches.includes(element)) {
-                        matches.push(element);
+                const ariaLabelFromIds = (element, attribute) => {
+                    if (!element || !element.getAttribute) {
+                        return null;
                     }
+                    const idList = element.getAttribute(attribute);
+                    if (!idList) {
+                        return null;
+                    }
+                    const ids = idList.split(/\s+/).filter(Boolean);
+                    const ownerDocument = element.ownerDocument || document;
+                    for (const id of ids) {
+                        if (!ownerDocument) {
+                            continue;
+                        }
+                        const ref = ownerDocument.getElementById(id);
+                        if (ref && ref.textContent) {
+                            const text = ref.textContent.trim();
+                            if (text) {
+                                return text;
+                            }
+                        }
+                    }
+                    return null;
                 };
 
-                const collectMatches = (root) => {
-                    if (!root) {
-                        return;
+                const collectSourceHint = (element) => {
+                    if (!element) {
+                        return null;
                     }
-                    const walker = document.createTreeWalker(
-                        root,
-                        NodeFilter.SHOW_ELEMENT,
-                        null,
-                        false,
-                    );
-                    let current = walker.currentNode;
-                    while (current) {
-                        const el = current;
-                        if (isFailureText(el.innerText) || isFailureText(el.textContent)) {
-                            registerMatch(el);
-                        } else {
-                            const ariaLabel = el.getAttribute ? el.getAttribute('aria-label') : null;
-                            if (isFailureText(ariaLabel)) {
-                                registerMatch(el);
-                            }
-                        }
-
-                        if (el.getAttribute) {
-                            const dataState = el.getAttribute('data-state');
-                            if (
-                                dataState &&
-                                normalizedStates.includes(dataState.toLowerCase())
-                            ) {
-                                registerMatch(el);
-                            }
-                        }
-
-                        if (el.classList) {
-                            for (const cls of el.classList) {
-                                if (normalizedStates.includes(cls.toLowerCase())) {
-                                    registerMatch(el);
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (el.shadowRoot) {
-                            collectMatches(el.shadowRoot);
-                        }
-
-                        if (el.tagName === 'IFRAME' && el.contentDocument) {
-                            collectMatches(el.contentDocument);
-                        }
-
-                        current = walker.nextNode();
+                    const sources = [];
+                    if (element.currentSrc) {
+                        sources.push(element.currentSrc);
                     }
+                    if (element.src) {
+                        sources.push(element.src);
+                    }
+                    if (element.srcset) {
+                        sources.push(element.srcset);
+                    }
+                    const combined = sources.join(' ').toLowerCase();
+                    if (!combined) {
+                        return null;
+                    }
+                    for (const hint of normalizedImageHints) {
+                        if (combined.includes(hint)) {
+                            return hint;
+                        }
+                    }
+                    return null;
                 };
 
-                collectMatches(document);
+                const hasFailureBackground = (element) => {
+                    if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+                        return null;
+                    }
+                    const style = window.getComputedStyle(element);
+                    if (!style) {
+                        return null;
+                    }
+                    const backgroundImage = style.getPropertyValue('background-image');
+                    if (!backgroundImage) {
+                        return null;
+                    }
+                    const lower = backgroundImage.toLowerCase();
+                    for (const hint of normalizedImageHints) {
+                        if (lower.includes(hint)) {
+                            return hint;
+                        }
+                    }
+                    return null;
+                };
+
+                const labelMap = new Map();
+                const potentialContainers = new Set();
 
                 const findCandidateContainer = (start) => {
                     let node = start;
                     while (node) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
                             const element = node;
-                            const matchesSelector =
-                                '[data-camera], [data-camera-id], article, section, figure, div, frigate-card, frigate-card-camera, frigate-card-camera-live, frigate-card-camera-state';
-                            if (element.matches(matchesSelector)) {
+                            if (containerSelectors.some((selector) => {
+                                try {
+                                    return element.matches(selector);
+                                } catch (error) {
+                                    return false;
+                                }
+                            })) {
                                 return element;
+                            }
+                        }
+                        if (node.parentElement) {
+                            node = node.parentElement;
+                        } else if (node.assignedSlot) {
+                            node = node.assignedSlot;
+                        } else {
+                            const root = node.getRootNode ? node.getRootNode() : null;
+                            if (root && root.host) {
+                                node = root.host;
+                            } else {
+                                break;
                             }
                         }
 
@@ -212,91 +388,316 @@ async def _detect_failed_cameras(page) -> List[str]:
                     return null;
                 };
 
-                matches.forEach((el, index) => {
-                    const card = findCandidateContainer(el);
-                    let identifier = '';
-                    if (card) {
-                        const datasetCamera = card.dataset ? card.dataset.camera : null;
-                        const datasetCameraId = card.dataset ? card.dataset.cameraId : null;
-                        if (datasetCamera) {
-                            identifier = datasetCamera.trim();
-                        }
-                        if (!identifier && datasetCameraId) {
-                            identifier = datasetCameraId.trim();
-                        }
-                        const directDataCamera = card.getAttribute('data-camera');
-                        if (!identifier && directDataCamera) {
-                            identifier = directDataCamera.trim();
-                        }
-                        const directDataCameraId = card.getAttribute('data-camera-id');
-                        if (!identifier && directDataCameraId) {
-                            identifier = directDataCameraId.trim();
-                        }
-                        if (!identifier && card.id) {
-                            identifier = card.id.trim();
-                        }
-                        const ariaLabel = card.getAttribute('aria-label');
-                        if (!identifier && ariaLabel) {
-                            identifier = ariaLabel.trim();
-                        }
-                        if (!identifier) {
-                            for (const selector of labelSelectors) {
-                                const label = card.querySelector(selector);
-                                if (
-                                    label &&
-                                    label.textContent &&
-                                    label.textContent.trim()
-                                ) {
-                                    identifier = label.textContent.trim();
-                                    break;
+                for (const selector of labelSelectors) {
+                    try {
+                        document.querySelectorAll(selector).forEach((label) => {
+                            const container = findCandidateContainer(label);
+                            if (container) {
+                                potentialContainers.add(container);
+                                const textContent = label.textContent ? label.textContent.trim() : '';
+                                if (textContent) {
+                                    const existing = labelMap.get(container) || [];
+                                    if (!existing.includes(textContent)) {
+                                        existing.push(textContent);
+                                        labelMap.set(container, existing);
+                                    }
                                 }
+                            }
+                        });
+                    } catch (error) {
+                        // Ignore invalid selectors
+                    }
+                }
+
+                for (const selector of containerSelectors) {
+                    try {
+                        document.querySelectorAll(selector).forEach((container) => {
+                            potentialContainers.add(container);
+                        });
+                    } catch (error) {
+                        // Ignore invalid selectors
+                    }
+                }
+
+                const containers = Array.from(potentialContainers).filter(
+                    (el) => el && el.nodeType === Node.ELEMENT_NODE,
+                );
+                const limitedContainers = containers.slice(0, 50);
+                const results = [];
+
+                const inspectElement = (root, info) => {
+                    if (!root) {
+                        return;
+                    }
+                    const walker = document.createTreeWalker(
+                        root,
+                        NodeFilter.SHOW_ELEMENT,
+                        null,
+                        false,
+                    );
+                    let current = walker.currentNode;
+                    while (current) {
+                        const element = current;
+                        if (!info.hasVisualContent) {
+                            const tagName = element.tagName || '';
+                            if (['IMG', 'CANVAS', 'VIDEO', 'PICTURE', 'SVG'].includes(tagName)) {
+                                info.hasVisualContent = true;
                             }
                         }
 
-                        if (node.parentElement) {
-                            node = node.parentElement;
-                            continue;
+                        const backgroundHint = hasFailureBackground(element);
+                        if (backgroundHint) {
+                            info.hasVisualContent = true;
+                            pushUnique(info.imageHints, `background:${backgroundHint}`);
                         }
-                        if (node.assignedSlot) {
-                            node = node.assignedSlot;
-                            continue;
+
+                        const sourceHint = collectSourceHint(element);
+                        if (sourceHint) {
+                            info.hasVisualContent = true;
+                            pushUnique(info.imageHints, `source:${sourceHint}`);
                         }
-                        const root = node.getRootNode ? node.getRootNode() : null;
-                        if (root && root.host) {
-                            node = root.host;
-                            continue;
+
+                        const textContent = element.innerText || element.textContent;
+                        if (isFailureText(textContent)) {
+                            pushUnique(info.textMatches, String(textContent).trim().slice(0, 160));
+                        } else if (element.getAttribute) {
+                            const ariaLabel = element.getAttribute('aria-label');
+                            if (isFailureText(ariaLabel)) {
+                                pushUnique(info.textMatches, ariaLabel.trim().slice(0, 160));
+                            }
+                            const ariaDescription = element.getAttribute('aria-description');
+                            if (isFailureText(ariaDescription)) {
+                                pushUnique(info.textMatches, ariaDescription.trim().slice(0, 160));
+                            }
+                            const labelledBy = ariaLabelFromIds(element, 'aria-labelledby');
+                            if (isFailureText(labelledBy)) {
+                                pushUnique(info.textMatches, labelledBy.slice(0, 160));
+                            }
+                            const describedBy = ariaLabelFromIds(element, 'aria-describedby');
+                            if (isFailureText(describedBy)) {
+                                pushUnique(info.textMatches, describedBy.slice(0, 160));
+                            }
+                            const titleAttr = element.getAttribute('title');
+                            if (isFailureText(titleAttr)) {
+                                pushUnique(info.textMatches, titleAttr.trim().slice(0, 160));
+                            }
+                            const altAttr = element.getAttribute('alt');
+                            if (isFailureText(altAttr)) {
+                                pushUnique(info.textMatches, altAttr.trim().slice(0, 160));
+                            }
+
+                            const dataState = element.getAttribute('data-state');
+                            if (dataState && normalizedStates.includes(dataState.toLowerCase())) {
+                                pushUnique(info.stateMatches, `data-state:${dataState}`);
+                            }
+                            const dataStatus = element.getAttribute('data-status');
+                            if (dataStatus && normalizedStates.includes(dataStatus.toLowerCase())) {
+                                pushUnique(info.stateMatches, `data-status:${dataStatus}`);
+                            }
                         }
-                        break;
+
+                        if (element.dataset) {
+                            const datasetState = element.dataset.state;
+                            if (datasetState && normalizedStates.includes(String(datasetState).toLowerCase())) {
+                                pushUnique(info.stateMatches, `dataset.state:${datasetState}`);
+                            }
+                            const datasetStatus = element.dataset.status;
+                            if (datasetStatus && normalizedStates.includes(String(datasetStatus).toLowerCase())) {
+                                pushUnique(info.stateMatches, `dataset.status:${datasetStatus}`);
+                            }
+                        }
+
+                        if (element.classList) {
+                            element.classList.forEach((cls) => {
+                                if (normalizedStates.includes(cls.toLowerCase())) {
+                                    pushUnique(info.stateMatches, `class:${cls}`);
+                                }
+                            });
+                        }
+
+                        if (element.shadowRoot) {
+                            inspectElement(element.shadowRoot, info);
+                        }
+
+                        if (element.tagName === 'IFRAME' && element.contentDocument) {
+                            inspectElement(element.contentDocument, info);
+                        }
+
+                        current = walker.nextNode();
+                    }
+                };
+
+                limitedContainers.forEach((container, index) => {
+                    const containerId = ensureElementId(container);
+                    if (!containerId) {
+                        return;
+                    }
+
+                    const labelTexts = [];
+                    const mapped = labelMap.get(container) || [];
+                    mapped.forEach((text) => pushUnique(labelTexts, text));
+                    for (const selector of labelSelectors) {
+                        try {
+                            container.querySelectorAll(selector).forEach((label) => {
+                                if (label && label.textContent) {
+                                    pushUnique(labelTexts, label.textContent.trim());
+                                }
+                            });
+                        } catch (error) {
+                            // Ignore invalid selectors
+                        }
+                    }
+
+                    let identifier = '';
+                    if (container.dataset) {
+                        if (container.dataset.camera) {
+                            identifier = container.dataset.camera.trim();
+                        } else if (container.dataset.cameraId) {
+                            identifier = container.dataset.cameraId.trim();
+                        } else if (container.dataset.cameraName) {
+                            identifier = container.dataset.cameraName.trim();
+                        }
+                    }
+                    if (!identifier && container.getAttribute) {
+                        const directCamera = container.getAttribute('data-camera');
+                        const directCameraId = container.getAttribute('data-camera-id');
+                        if (directCamera) {
+                            identifier = directCamera.trim();
+                        } else if (directCameraId) {
+                            identifier = directCameraId.trim();
+                        }
+                    }
+                    if (!identifier && container.id) {
+                        identifier = container.id.trim();
+                    }
+                    if (!identifier && container.getAttribute) {
+                        const ariaLabel = container.getAttribute('aria-label');
+                        if (ariaLabel) {
+                            identifier = ariaLabel.trim();
+                        }
+                    }
+                    if (!identifier && labelTexts.length > 0) {
+                        identifier = labelTexts[0];
                     }
                     if (!identifier) {
                         identifier = `camera-${index + 1}`;
                     }
-                    if (!seen.has(identifier)) {
-                        seen.add(identifier);
-                        identifiers.push(identifier);
+
+                    const info = {
+                        containerId,
+                        identifier,
+                        labelTexts,
+                        textMatches: [],
+                        stateMatches: [],
+                        imageHints: [],
+                        hasVisualContent: false,
+                    };
+
+                    inspectElement(container, info);
+
+                    if (!info.hasVisualContent) {
+                        try {
+                            const style = window.getComputedStyle(container);
+                            if (
+                                style &&
+                                style.getPropertyValue('background-image') &&
+                                style.getPropertyValue('background-image') !== 'none'
+                            ) {
+                                info.hasVisualContent = true;
+                            }
+                        } catch (error) {
+                            // Ignore getComputedStyle errors
+                        }
                     }
+
+                    results.push(info);
                 });
 
-                return identifiers;
+                return results;
             }
             """,
             {
                 "failureTexts": failure_texts,
                 "failureStates": failure_states,
+                "failureImageHints": failure_image_hints,
                 "labelSelectors": label_selectors,
+                "containerSelectors": container_selectors,
             },
         )
-        return [str(identifier) for identifier in failed]
+
+        if not isinstance(result, list):
+            return []
+        return result
 
     attempts = 10
     delay_ms = 1000
     last_result: List[str] = []
     for attempt in range(attempts):
-        current = await _scan_once()
-        if current:
-            return current
-        last_result = current
+        scan_results = await _scan_once()
+        seen_identifiers: set[str] = set()
+        failures: List[str] = []
+        ocr_candidates: List[Dict[str, Any]] = []
+
+        for entry in scan_results:
+            identifier = str(entry.get("identifier") or "").strip()
+            if not identifier:
+                continue
+
+            text_matches = entry.get("textMatches") or []
+            state_matches = entry.get("stateMatches") or []
+
+            if text_matches or state_matches:
+                if identifier not in seen_identifiers:
+                    seen_identifiers.add(identifier)
+                    failures.append(identifier)
+                continue
+
+            if entry.get("hasVisualContent"):
+                ocr_candidates.append(entry)
+
+        if ocr_candidates:
+            backend = _ensure_ocr_backend()
+            if backend:
+                prioritized: List[Dict[str, Any]] = []
+                prioritized.extend(
+                    [candidate for candidate in ocr_candidates if candidate.get("imageHints")]
+                )
+                prioritized.extend(
+                    [candidate for candidate in ocr_candidates if not candidate.get("imageHints")]
+                )
+
+                seen_containers: set[str] = set()
+                for candidate in prioritized:
+                    container_id = candidate.get("containerId")
+                    if not container_id or container_id in seen_containers:
+                        continue
+                    seen_containers.add(container_id)
+
+                    text = await _extract_text_via_ocr(page, container_id, backend)
+                    if not text:
+                        continue
+
+                    if _contains_failure_text(text, failure_texts):
+                        identifier = str(candidate.get("identifier") or "").strip()
+                        if identifier and identifier not in seen_identifiers:
+                            seen_identifiers.add(identifier)
+                            failures.append(identifier)
+                            logger.debug(
+                                "Detected failed camera via OCR (%s): %s",
+                                identifier,
+                                text.replace("\n", " ").strip(),
+                            )
+            else:
+                logger.debug(
+                    "Skipping OCR-based camera failure detection because no backend is available",
+                )
+
+        if failures:
+            return failures
+
+        last_result = failures
         await page.wait_for_timeout(delay_ms)
+
     return last_result
 
 
