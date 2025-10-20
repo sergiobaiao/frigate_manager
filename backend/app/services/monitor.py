@@ -38,36 +38,72 @@ async def _fetch_page_screenshot(page, output_path: Path) -> str:
     return str(output_path)
 
 
-async def _detect_failed_cameras(page) -> Dict[str, List[str]]:
+async def _detect_failed_cameras(page) -> List[str]:
     await page.wait_for_timeout(2000)
     failed = await page.evaluate(
         """
         () => {
             const failureText = "No frames have been received, check error logs";
-            const elements = Array.from(
-                document.querySelectorAll('*')
-            ).filter(el => el.textContent && el.textContent.includes(failureText));
-            return elements.map(el => {
-                const card = el.closest('[data-camera], .camera-card, article, section, div');
-                let identifier = 'unknown';
+            const matches = Array.from(document.querySelectorAll('*')).filter(
+                (el) => el.textContent && el.textContent.includes(failureText)
+            );
+            const identifiers = [];
+            const seen = new Set();
+            const labelSelectors = [
+                '[data-testid="camera-title"]',
+                '.camera-title',
+                '.title',
+                '.camera-header',
+                'header h1',
+                'header h2',
+                'h1',
+                'h2',
+                'h3',
+                'h4',
+                'h5',
+                'h6',
+                'figcaption',
+            ];
+            matches.forEach((el, index) => {
+                const card = el.closest('[data-camera], article, section, figure, div');
+                let identifier = '';
                 if (card) {
-                    if (card.dataset && card.dataset.camera) {
-                        identifier = card.dataset.camera;
-                    } else if (card.id) {
-                        identifier = card.id;
-                    } else {
-                        const heading = card.querySelector('h1, h2, h3, h4, h5, h6, .title');
-                        if (heading && heading.textContent) {
-                            identifier = heading.textContent.trim();
+                    const datasetCamera = card.dataset ? card.dataset.camera : null;
+                    if (datasetCamera) {
+                        identifier = datasetCamera.trim();
+                    }
+                    if (!identifier && card.getAttribute('data-camera')) {
+                        identifier = card.getAttribute('data-camera').trim();
+                    }
+                    if (!identifier && card.id) {
+                        identifier = card.id.trim();
+                    }
+                    if (!identifier && card.getAttribute('aria-label')) {
+                        identifier = card.getAttribute('aria-label').trim();
+                    }
+                    if (!identifier) {
+                        for (const selector of labelSelectors) {
+                            const label = card.querySelector(selector);
+                            if (label && label.textContent && label.textContent.trim()) {
+                                identifier = label.textContent.trim();
+                                break;
+                            }
                         }
                     }
                 }
-                return identifier;
+                if (!identifier) {
+                    identifier = `camera-${index + 1}`;
+                }
+                if (!seen.has(identifier)) {
+                    seen.add(identifier);
+                    identifiers.push(identifier);
+                }
             });
+            return identifiers;
         }
         """
     )
-    return {"camera_ids": failed, "count": len(failed)}
+    return [str(identifier) for identifier in failed]
 
 
 def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager) -> HostCheck:
@@ -259,24 +295,12 @@ async def check_host(
                 "summary": "Unable to load Frigate dashboard",
                 "failure_event": None,
             }
+        initial_failed = await _detect_failed_cameras(page)
         if recorder:
-            try:
-                title = await page.title()
-            except Exception:  # pragma: no cover - best effort
-                title = None
-            title_suffix = f' with title "{title}"' if title else ""
-            recorder.log(f"Dashboard loaded{title_suffix}")
-        detection = await _detect_failed_cameras(page)
-        if recorder:
-            recorder.log(f"Initial scan detected {detection['count']} failing cameras")
-        if detection["count"] == 0:
-            if recorder:
-                preview = "; ".join(console_messages[-5:])[:500]
-                recorder.log(
-                    f"Recent browser console output: {preview}"
-                    if preview
-                    else "No browser console output captured"
-                )
+            recorder.log(
+                f"Initial scan detected {len(initial_failed)} failing cameras via dashboard inspection"
+            )
+        if not initial_failed:
             await context.close()
             await browser.close()
             return {
@@ -330,16 +354,11 @@ async def check_host(
                 "summary": "Retry failed to load dashboard",
                 "failure_event": None,
             }
+        retry_failed_ids = sorted(await _detect_failed_cameras(page))
         if recorder:
-            try:
-                retry_title = await page.title()
-            except Exception:  # pragma: no cover - best effort
-                retry_title = None
-            retry_title_suffix = f' with title "{retry_title}"' if retry_title else ""
-            recorder.log(f"Retry dashboard loaded{retry_title_suffix}")
-        second_detection = await _detect_failed_cameras(page)
-        if recorder:
-            recorder.log(f"Retry detected {second_detection['count']} failing cameras")
+            recorder.log(
+                f"Retry detected {len(retry_failed_ids)} failing cameras via dashboard inspection"
+            )
         retry_timestamp = now_tz(timezone)
         second_path = SCREENSHOT_DIR / f"{hostname}-{retry_timestamp.strftime('%Y%m%dT%H%M%S')}-retry.png"
         second_screenshot = await _fetch_page_screenshot(page, second_path)
@@ -354,16 +373,19 @@ async def check_host(
         await context.close()
         await browser.close()
 
-    if second_detection["count"] == 0:
+    if not retry_failed_ids:
         return {
             "status": "success",
             "summary": "Issue cleared before retry completed",
             "failure_event": None,
         }
 
-    camera_ids = [str(identifier) for identifier in second_detection["camera_ids"]]
+    camera_ids = retry_failed_ids
     if recorder:
-        recorder.log(f"Failure persists for {second_detection['count']} cameras: {', '.join(camera_ids)}")
+        recorder.log(
+            "Failure persists for %s cameras: %s"
+            % (len(camera_ids), ", ".join(camera_ids))
+        )
 
     services = ["go2rtc", "nginx", "frigate"]
     log_files: List[str] = []
@@ -410,7 +432,7 @@ async def check_host(
 
     failure_event = FailureEvent(
         host_id=host.id,
-        failure_count=second_detection["count"],
+        failure_count=len(camera_ids),
         camera_ids=camera_ids,
         failure_start=normalized_failure_start,
         first_screenshot_path=first_screenshot,
@@ -424,14 +446,14 @@ async def check_host(
         session.commit()
         session.refresh(failure_event)
 
-    summary = f"Detected {second_detection['count']} failing cameras"
+    summary = f"Detected {len(camera_ids)} failing cameras"
     if recorder:
         recorder.log("Failure recorded and notifications scheduled")
 
     message_lines = [
         f"<b>Frigate Manager Alert</b>",
         f"Host: <code>{hostname}</code>",
-        f"Affected cameras: {second_detection['count']}",
+        f"Affected cameras: {len(camera_ids)}",
         f"Identifiers: {', '.join(camera_ids)}",
     ]
     if normalized_failure_start:
