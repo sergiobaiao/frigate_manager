@@ -46,6 +46,10 @@ export type Config = {
   DEBUG_MODE: boolean;
 };
 
+export type ScreenshotTestResponse = {
+  image_data_url: string;
+};
+
 export const fetchHosts = async (): Promise<Host[]> => {
   const { data } = await api.get<Host[]>('/hosts');
   return data;
@@ -91,6 +95,11 @@ export const fetchConfig = async (): Promise<Config> => {
 
 export const updateConfig = async (payload: Partial<Config>): Promise<Config> => {
   const { data } = await api.put<Config>('/config', payload);
+  return data;
+};
+
+export const captureTestScreenshot = async (url: string): Promise<ScreenshotTestResponse> => {
+  const { data } = await api.post<ScreenshotTestResponse>('/config/test-screenshot', { url });
   return data;
 };
 

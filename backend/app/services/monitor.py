@@ -550,50 +550,6 @@ async def _detect_failed_cameras(page) -> List[str]:
                     return null;
                 };
 
-                for (const selector of labelSelectors) {
-                    try {
-                        document.querySelectorAll(selector).forEach((label) => {
-                            const container = findCandidateContainer(label);
-                            if (container) {
-                                potentialContainers.add(container);
-                                const textContent = label.textContent ? label.textContent.trim() : '';
-                                if (textContent) {
-                                    const existing = labelMap.get(container) || [];
-                                    if (!existing.includes(textContent)) {
-                                        existing.push(textContent);
-                                        labelMap.set(container, existing);
-                                    }
-                                }
-                            }
-                        });
-                    } catch (error) {
-                        // Ignore invalid selectors
-                    }
-                    return null;
-                };
-
-                for (const selector of labelSelectors) {
-                    try {
-                        document.querySelectorAll(selector).forEach((label) => {
-                            const container = findCandidateContainer(label);
-                            if (container) {
-                                potentialContainers.add(container);
-                                const textContent = label.textContent ? label.textContent.trim() : '';
-                                if (textContent) {
-                                    const existing = labelMap.get(container) || [];
-                                    if (!existing.includes(textContent)) {
-                                        existing.push(textContent);
-                                        labelMap.set(container, existing);
-                                    }
-                                }
-                            }
-                        });
-                    } catch (error) {
-                        // Ignore invalid selectors
-                    }
-                    return null;
-                };
-
                 allElements.forEach((element) => {
                     for (const selector of labelSelectors) {
                         try {

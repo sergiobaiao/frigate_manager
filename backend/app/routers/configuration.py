@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import base64
 
-from ..config import AppConfig, ConfigManager
-from ..schemas.configuration import ConfigRead, ConfigUpdate
+from fastapi import APIRouter, Depends, HTTPException
+from playwright.async_api import async_playwright
+
+from ..config import ConfigManager
+from ..schemas.configuration import (
+    ConfigRead,
+    ConfigUpdate,
+    ScreenshotTestRequest,
+    ScreenshotTestResponse,
+)
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -35,3 +43,21 @@ def update_config(
     config = manager.update(payload.dict(exclude_unset=True))
     monitor_scheduler.reload()
     return ConfigRead(**config.dict(by_alias=True))
+
+
+@router.post("/test-screenshot", response_model=ScreenshotTestResponse)
+async def capture_test_screenshot(payload: ScreenshotTestRequest) -> ScreenshotTestResponse:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+        try:
+            await page.goto(payload.url, wait_until="networkidle", timeout=60000)
+            screenshot_bytes = await page.screenshot(full_page=True)
+        except Exception as exc:  # pragma: no cover - network/remote failures
+            raise HTTPException(status_code=400, detail=f"Failed to capture screenshot: {exc}") from exc
+        finally:
+            await context.close()
+            await browser.close()
+    encoded = base64.b64encode(screenshot_bytes).decode("ascii")
+    return ScreenshotTestResponse(image_data_url=f"data:image/png;base64,{encoded}")

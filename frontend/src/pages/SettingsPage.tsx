@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-import { Config, fetchConfig, updateConfig } from '../api';
+import { Config, captureTestScreenshot, fetchConfig, updateConfig } from '../api';
 import TagInput from '../components/TagInput';
 
 const SettingsPage = () => {
@@ -15,6 +15,10 @@ const SettingsPage = () => {
 
   const [formState, setFormState] = useState<Partial<Config>>({});
   const [mentionIds, setMentionIds] = useState<string[]>([]);
+  const [testUrl, setTestUrl] = useState('');
+  const [testScreenshot, setTestScreenshot] = useState<string | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [isTesting, setIsTesting] = useState(false);
 
   useEffect(() => {
     if (config?.MENTION_USER_IDS !== undefined) {
@@ -32,6 +36,25 @@ const SettingsPage = () => {
       MENTION_USER_IDS: mentionIds.join(',')
     };
     await mutation.mutateAsync(payload);
+  };
+
+  const handleTestScreenshot = async () => {
+    if (!testUrl) {
+      setTestError('Please enter a URL to test.');
+      return;
+    }
+    setIsTesting(true);
+    setTestError(null);
+    setTestScreenshot(null);
+    try {
+      const response = await captureTestScreenshot(testUrl);
+      setTestScreenshot(response.image_data_url);
+    } catch (error) {
+      const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setTestError(detail ?? 'Unable to capture a screenshot for the provided URL.');
+    } finally {
+      setIsTesting(false);
+    }
   };
 
   return (
@@ -122,6 +145,45 @@ const SettingsPage = () => {
           {mutation.isPending ? 'Saving…' : 'Save configuration'}
         </button>
       </form>
+      <hr style={{ margin: '2rem 0' }} />
+      <div>
+        <h3>Test dashboard screenshot</h3>
+        <p style={{ marginBottom: '1rem' }}>
+          Provide a webpage URL to verify that Frigate Manager can capture live dashboard screenshots.
+        </p>
+        <div className="form-row" style={{ gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '0.75rem' }}>
+          <input
+            type="url"
+            placeholder="https://example.com"
+            value={testUrl}
+            onChange={(event) => setTestUrl(event.target.value)}
+          />
+          <button
+            type="button"
+            className="action-button"
+            style={{ whiteSpace: 'nowrap' }}
+            onClick={handleTestScreenshot}
+            disabled={isTesting}
+          >
+            {isTesting ? 'Capturing…' : 'Run test'}
+          </button>
+        </div>
+        {testError && (
+          <p className="error-text" style={{ marginTop: '0.75rem' }}>
+            {testError}
+          </p>
+        )}
+        {testScreenshot && (
+          <div style={{ marginTop: '1.5rem' }}>
+            <p style={{ marginBottom: '0.5rem' }}>Screenshot preview</p>
+            <img
+              src={testScreenshot}
+              alt="Test screenshot preview"
+              style={{ width: '100%', borderRadius: '0.5rem', border: '1px solid var(--muted-border-color)' }}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 };
