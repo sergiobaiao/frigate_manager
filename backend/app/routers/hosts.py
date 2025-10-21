@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -25,7 +25,7 @@ def list_hosts() -> List[HostRead]:
 @router.post("", response_model=HostRead)
 def create_host(payload: HostCreate) -> HostRead:
     host = Host.from_orm(payload)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     host.created_at = now
     host.updated_at = now
     with get_session() as session:
@@ -44,7 +44,7 @@ def update_host(host_id: int, payload: HostUpdate) -> HostRead:
         data = payload.dict(exclude_unset=True)
         for key, value in data.items():
             setattr(host, key, value)
-        host.updated_at = datetime.utcnow()
+        host.updated_at = datetime.now(timezone.utc)
         session.add(host)
         session.commit()
         session.refresh(host)

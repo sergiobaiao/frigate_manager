@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
+
+from ._timezone import apply_config_timezone
 
 
 class LogEntryRead(BaseModel):
@@ -18,6 +20,10 @@ class LogEntryRead(BaseModel):
 
     class Config:
         orm_mode = True
+
+    @validator("timestamp", "created_at", pre=False)
+    def _set_log_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return apply_config_timezone(value)
 
 
 class LogQueryParams(BaseModel):

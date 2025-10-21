@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
+
+from ._timezone import apply_config_timezone
 
 
 class FailureEventRead(BaseModel):
@@ -20,12 +22,20 @@ class FailureEventRead(BaseModel):
     class Config:
         orm_mode = True
 
+    @validator("failure_start", "created_at", pre=False)
+    def _set_failure_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return apply_config_timezone(value)
+
 
 class FailureStats(BaseModel):
     host_id: int
     total_failures: int
     total_cameras_impacted: int
     last_failure: Optional[datetime]
+
+    @validator("last_failure", pre=False)
+    def _set_stats_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return apply_config_timezone(value)
 
 
 class HostDashboard(BaseModel):
