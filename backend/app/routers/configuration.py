@@ -48,11 +48,19 @@ def update_config(
 @router.post("/test-screenshot", response_model=ScreenshotTestResponse)
 async def capture_test_screenshot(payload: ScreenshotTestRequest) -> ScreenshotTestResponse:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        context = await browser.new_context()
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
         try:
-            await page.goto(payload.url, wait_until="networkidle", timeout=60000)
+            await page.goto(payload.url, timeout=60000)
+            await page.wait_for_timeout(5000)
             screenshot_bytes = await page.screenshot(full_page=True)
         except Exception as exc:  # pragma: no cover - network/remote failures
             raise HTTPException(status_code=400, detail=f"Failed to capture screenshot: {exc}") from exc

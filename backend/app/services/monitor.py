@@ -1142,8 +1142,15 @@ async def check_host(
     if recorder and debug_mode:
         recorder.log("Debug mode enabled: additional Playwright traces will be captured")
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
         console_messages: List[str] = []
         initial_trace_started = False
@@ -1161,7 +1168,8 @@ async def check_host(
         if recorder:
             recorder.log("Loading Frigate dashboard")
         try:
-            await page.goto(host.base_url, wait_until="networkidle", timeout=60000)
+            await page.goto(host.base_url, timeout=60000)
+            await page.wait_for_timeout(5000)
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Failed to load Frigate host %s: %s", host.base_url, exc)
             if recorder:
@@ -1216,8 +1224,15 @@ async def check_host(
     await asyncio.sleep(config.retry_delay_minutes * 60)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
         retry_console_messages: List[str] = []
         retry_trace_started = False
@@ -1235,7 +1250,8 @@ async def check_host(
         if recorder:
             recorder.log("Retrying Frigate dashboard after delay")
         try:
-            await page.goto(host.base_url, wait_until="networkidle", timeout=60000)
+            await page.goto(host.base_url, timeout=60000)
+            await page.wait_for_timeout(5000)
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Failed to load Frigate host on retry %s: %s", host.base_url, exc)
             if recorder:
