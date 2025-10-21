@@ -7,14 +7,18 @@ from typing import Iterable, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from sqlmodel import func, select
 
+from ..config import ConfigManager
 from ..database import get_session
 from ..models import FailureEvent, Host, HostCheck, LogEntry
 from ..schemas.checks import HostCheckRead
 from ..schemas.failures import FailureEventRead, FailureStats
 from ..schemas.logs import LogEntryRead
 from ..utils.paths import DATA_DIR, LOG_DIR, SCREENSHOT_DIR
+from ..utils.timezone import to_timezone
 
 router = APIRouter(prefix="/failures", tags=["failures"])
+
+_CONFIG_MANAGER = ConfigManager()
 
 
 def _public_media_path(raw_path: Optional[str]) -> Optional[str]:
@@ -91,7 +95,8 @@ def _latest_media(host: Host, failures: List[FailureEvent]) -> dict:
         if captured_at is None:
             try:
                 timestamp = datetime.fromtimestamp(path_obj.stat().st_mtime, tz=timezone.utc)
-                captured_at = timestamp.isoformat()
+                localized = to_timezone(timestamp, _CONFIG_MANAGER.timezone)
+                captured_at = localized.isoformat() if localized else timestamp.isoformat()
             except FileNotFoundError:
                 captured_at = None
         if public := _public_media_path(raw_path):
@@ -222,10 +227,21 @@ def host_summary(host_id: int) -> dict:
             .limit(1)
         ).first()
     serialized_failures = [_serialize_failure(failure) for failure in failures]
+    latest_media = _latest_media(host, failures)
+    if latest_media.get("captured_at"):
+        try:
+            captured_dt = datetime.fromisoformat(str(latest_media["captured_at"]))
+        except ValueError:
+            captured_dt = None
+        if captured_dt:
+            localized = to_timezone(captured_dt, _CONFIG_MANAGER.timezone)
+            if localized:
+                latest_media["captured_at"] = localized.isoformat()
+
     return {
         "host": host,
         "failures": serialized_failures,
-        "latest_media": _latest_media(host, failures),
+        "latest_media": latest_media,
         "current_check": _serialize_check(active_check) if active_check else None,
         "latest_check": _serialize_check(latest_check) if latest_check else None,
     }

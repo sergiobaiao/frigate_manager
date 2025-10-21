@@ -4,7 +4,7 @@ import asyncio
 import io
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
@@ -25,6 +25,28 @@ from ..services.notifications import send_media, send_message
 from ..utils.paths import LOG_DIR, SCREENSHOT_DIR, TRACE_DIR
 from ..utils.playwright_settings import PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT
 from ..utils.timezone import now_tz
+
+STREAM_BLOCK_PATTERNS = [
+    "**/live/jsmpeg/**",
+    "**/live/mjpeg/**",
+    "**/live/webrtc/**",
+]
+
+
+async def _block_streaming_requests(page, recorder=None) -> None:
+    seen: set[str] = set()
+
+    async def _handler(route):  # pragma: no cover - requires Playwright runtime
+        url = route.request.url
+        if url not in seen:
+            seen.add(url)
+            logger.debug("Blocking streaming request during monitoring: %s", url)
+            if recorder:
+                recorder.log(f"Blocked streaming request: {url}")
+        await route.abort()
+
+    for pattern in STREAM_BLOCK_PATTERNS:
+        await page.route(pattern, _handler)
 
 logger = logging.getLogger(__name__)
 
@@ -979,7 +1001,7 @@ async def _detect_failed_cameras(page) -> List[str]:
 
 
 def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager) -> HostCheck:
-    now = datetime.utcnow()
+    now = datetime.now(dt_timezone.utc)
     initial_message = "Manual check requested" if trigger == "manual" else "Scheduled check queued"
     check = HostCheck(
         host_id=host_id,
@@ -1025,12 +1047,12 @@ def _update_check_record(
         if summary is not None:
             check.summary = summary
         if mark_started and check.started_at is None:
-            check.started_at = datetime.utcnow()
+            check.started_at = datetime.now(dt_timezone.utc)
         if finished:
-            check.finished_at = datetime.utcnow()
+            check.finished_at = datetime.now(dt_timezone.utc)
         if failure_event_id is not None:
             check.failure_event_id = failure_event_id
-        check.updated_at = datetime.utcnow()
+        check.updated_at = datetime.now(dt_timezone.utc)
         session.add(check)
         session.commit()
         session.refresh(check)
@@ -1133,8 +1155,8 @@ async def check_host(
     recorder: Optional[HostCheckRecorder] = None,
 ) -> HostCheckResult:
     config = config_manager.get()
-    timezone = config_manager.timezone
-    timestamp = now_tz(timezone)
+    config_timezone = config_manager.timezone
+    timestamp = now_tz(config_timezone)
     hostname = host.name
     first_screenshot: Optional[str] = None
     second_screenshot: Optional[str] = None
@@ -1152,6 +1174,7 @@ async def check_host(
             screen=PLAYWRIGHT_VIEWPORT,
         )
         page = await context.new_page()
+        await _block_streaming_requests(page, recorder)
         console_messages: List[str] = []
         initial_trace_started = False
 
@@ -1233,6 +1256,7 @@ async def check_host(
             screen=PLAYWRIGHT_VIEWPORT,
         )
         page = await context.new_page()
+        await _block_streaming_requests(page, recorder)
         retry_console_messages: List[str] = []
         retry_trace_started = False
 
@@ -1256,7 +1280,7 @@ async def check_host(
             if recorder:
                 recorder.log(f"Retry failed to load dashboard: {exc}")
             if debug_mode and retry_trace_started:
-                retry_trace_path = TRACE_DIR / f"{hostname}-{now_tz(timezone).strftime('%Y%m%dT%H%M%S')}-retry-trace.zip"
+                retry_trace_path = TRACE_DIR / f"{hostname}-{now_tz(config_timezone).strftime('%Y%m%dT%H%M%S')}-retry-trace.zip"
                 if saved := await _stop_tracing(context, retry_trace_path, recorder, "retry"):
                     trace_files.append(saved)
             await context.close()
@@ -1280,7 +1304,7 @@ async def check_host(
             recorder.log(
                 f"Retry detected {len(retry_failed_ids)} failing cameras via dashboard inspection"
             )
-        retry_timestamp = now_tz(timezone)
+        retry_timestamp = now_tz(config_timezone)
         second_path = SCREENSHOT_DIR / f"{hostname}-{retry_timestamp.strftime('%Y%m%dT%H%M%S')}-retry.png"
         second_screenshot = await _fetch_page_screenshot(page, second_path)
         if recorder:
@@ -1346,18 +1370,16 @@ async def check_host(
 
     failure_start = None
     for service in services:
-        estimate = estimate_failure_start(parsed_entries.get(service, []), timezone)
+        estimate = estimate_failure_start(parsed_entries.get(service, []), config_timezone)
         if estimate and (failure_start is None or estimate < failure_start):
             failure_start = estimate
 
     normalized_failure_start = None
     if failure_start:
-        localized = (
-            failure_start.astimezone(timezone)
-            if failure_start.tzinfo
-            else failure_start.replace(tzinfo=timezone)
-        )
-        normalized_failure_start = localized.replace(tzinfo=None)
+        if failure_start.tzinfo:
+            normalized_failure_start = failure_start.astimezone(dt_timezone.utc)
+        else:
+            normalized_failure_start = failure_start.replace(tzinfo=dt_timezone.utc)
 
     failure_event = FailureEvent(
         host_id=host.id,
@@ -1367,7 +1389,7 @@ async def check_host(
         first_screenshot_path=first_screenshot,
         second_screenshot_path=second_screenshot,
         log_files=log_files,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(dt_timezone.utc),
     )
 
     with get_session() as session:
