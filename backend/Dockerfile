@@ -48,8 +48,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-RUN python -m playwright install chromium
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -m playwright install \
+    && python -m playwright install-deps
 
 COPY app ./app
 
