@@ -1,7 +1,10 @@
 FROM mcr.microsoft.com/playwright/python:v1.46.0-jammy
 
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_REQUIRE_HASHES=0 \
+    PIP_ROOT_USER_ACTION=ignore \
+    PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
 
 WORKDIR /app
 
