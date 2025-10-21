@@ -17,8 +17,8 @@ from ..database import get_session
 from ..models import FailureEvent, Host, HostCheck
 from ..services.logs import (
     estimate_failure_start,
-    parse_log_entries,
     persist_log_entries,
+    prepare_log_content,
     save_log_file,
 )
 from ..services.notifications import send_media, send_message
@@ -1266,7 +1266,16 @@ async def check_host(
                 "summary": "Retry failed to load dashboard",
                 "failure_event": None,
             }
-        retry_failed_ids = sorted(await _detect_failed_cameras(page))
+        detected_retry_ids = await _detect_failed_cameras(page)
+        retry_failed_ids: List[str] = []
+        seen_retry_ids: set[str] = set()
+        for camera_id in detected_retry_ids:
+            normalized = camera_id.strip() if isinstance(camera_id, str) else str(camera_id)
+            if not normalized:
+                continue
+            if normalized not in seen_retry_ids:
+                seen_retry_ids.add(normalized)
+                retry_failed_ids.append(normalized)
         if recorder:
             recorder.log(
                 f"Retry detected {len(retry_failed_ids)} failing cameras via dashboard inspection"
@@ -1314,22 +1323,23 @@ async def check_host(
             try:
                 response = await client.get(url)
                 response.raise_for_status()
-                content = response.text
+                raw_content = response.text
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Failed to fetch log %s from %s: %s", service, host.base_url, exc)
                 if recorder:
                     recorder.log(f"Failed to fetch {service} logs: {exc}")
-                content = ""
+                raw_content = ""
+            content, entries = prepare_log_content(raw_content)
             path = save_log_file(hostname, service, content, LOG_DIR)
             log_files.append(str(path))
-            entries = parse_log_entries(content)
             parsed_entries[service] = entries
             with get_session() as session:
                 persist_log_entries(session, host.id, service, entries)
             if recorder:
-                recorder.log(
-                    f"Saved {service} logs to {path}" if content else f"No {service} log content retrieved"
-                )
+                if content:
+                    recorder.log(f"Saved {service} logs to {path}")
+                else:
+                    recorder.log(f"No {service} log content retrieved")
 
     if trace_files:
         log_files.extend(trace_files)
