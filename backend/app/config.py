@@ -36,7 +36,8 @@ class ConfigManager:
 
     @property
     def timezone(self) -> ZoneInfo:
-        return ZoneInfo("Etc/GMT+3")
+        # The application's default timezone is GMT-3.
+        return ZoneInfo("Etc/GMT-3")
 
     def read_config(self) -> AppConfig:
         with self._config_path.open("r", encoding="utf-8") as fh:
