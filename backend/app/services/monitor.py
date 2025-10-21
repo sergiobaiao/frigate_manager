@@ -23,6 +23,7 @@ from ..services.logs import (
 )
 from ..services.notifications import send_media, send_message
 from ..utils.paths import LOG_DIR, SCREENSHOT_DIR, TRACE_DIR
+from ..utils.playwright_settings import PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT
 from ..utils.timezone import now_tz
 
 logger = logging.getLogger(__name__)
@@ -1144,13 +1145,12 @@ async def check_host(
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--disable-gpu",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=PLAYWRIGHT_LAUNCH_ARGS,
         )
-        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+        context = await browser.new_context(
+            viewport=PLAYWRIGHT_VIEWPORT,
+            screen=PLAYWRIGHT_VIEWPORT,
+        )
         page = await context.new_page()
         console_messages: List[str] = []
         initial_trace_started = False
@@ -1226,13 +1226,12 @@ async def check_host(
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--disable-gpu",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=PLAYWRIGHT_LAUNCH_ARGS,
         )
-        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+        context = await browser.new_context(
+            viewport=PLAYWRIGHT_VIEWPORT,
+            screen=PLAYWRIGHT_VIEWPORT,
+        )
         page = await context.new_page()
         retry_console_messages: List[str] = []
         retry_trace_started = False
