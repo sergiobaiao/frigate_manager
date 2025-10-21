@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -14,12 +14,25 @@ from .utils.paths import DATA_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
+logger = logging.getLogger("frigate_manager.api")
+
 app = FastAPI(title="Frigate Manager")
 
 config_manager = ConfigManager()
 scheduler = MonitorScheduler(config_manager)
 app.state.config_manager = config_manager
 app.state.scheduler = scheduler
+
+
+@app.middleware("http")
+async def log_unhandled_exceptions(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        logger.exception(
+            "Unhandled exception during request %s %s", request.method, request.url.path
+        )
+        raise
 
 
 @app.on_event("startup")
