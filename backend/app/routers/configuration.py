@@ -12,6 +12,7 @@ from ..schemas.configuration import (
     ScreenshotTestRequest,
     ScreenshotTestResponse,
 )
+from ..utils.playwright_settings import PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -48,16 +49,18 @@ def update_config(
 @router.post("/test-screenshot", response_model=ScreenshotTestResponse)
 async def capture_test_screenshot(payload: ScreenshotTestRequest) -> ScreenshotTestResponse:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=PLAYWRIGHT_LAUNCH_ARGS,
+        )
+        page = await browser.new_page(viewport=PLAYWRIGHT_VIEWPORT)
         try:
-            await page.goto(payload.url, wait_until="networkidle", timeout=60000)
+            await page.goto(payload.url, timeout=60000)
+            await page.wait_for_timeout(5000)
             screenshot_bytes = await page.screenshot(full_page=True)
         except Exception as exc:  # pragma: no cover - network/remote failures
             raise HTTPException(status_code=400, detail=f"Failed to capture screenshot: {exc}") from exc
         finally:
-            await context.close()
             await browser.close()
     encoded = base64.b64encode(screenshot_bytes).decode("ascii")
     return ScreenshotTestResponse(image_data_url=f"data:image/png;base64,{encoded}")
