@@ -4,7 +4,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 from sqlmodel import Session
 
@@ -37,7 +37,18 @@ def extract_timestamp_from_line(line: str) -> Optional[datetime]:
     return parse_timestamp(match.group(1))
 
 
-def parse_log_entries(content: str) -> List[dict]:
+def _stringify(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _parse_plaintext_entries(content: str) -> List[dict]:
     entries: List[dict] = []
     for raw_line in content.splitlines():
         raw_line = raw_line.strip()
@@ -57,6 +68,91 @@ def parse_log_entries(content: str) -> List[dict]:
             }
         entries.append(parsed)
     return entries
+
+
+def _normalize_line_entry(payload: dict) -> dict:
+    entry = dict(payload)
+
+    message = entry.get("message") or entry.get("msg") or entry.get("line")
+    if message is not None:
+        entry.setdefault("message", message)
+
+    timestamp = (
+        entry.get("timestamp")
+        or entry.get("time")
+        or entry.get("ts")
+        or entry.get("datetime")
+    )
+    if timestamp is not None:
+        entry.setdefault("timestamp", timestamp)
+
+    level = entry.get("level") or entry.get("severity") or entry.get("log_level")
+    if level is not None:
+        entry.setdefault("level", level)
+
+    return entry
+
+
+def _determine_columns(entries: Sequence[dict]) -> List[str]:
+    preferred = ["timestamp", "level", "message"]
+    columns: List[str] = []
+    for key in preferred:
+        if any(key in entry for entry in entries):
+            columns.append(key)
+    extras: List[str] = []
+    for entry in entries:
+        for key in entry.keys():
+            if key not in columns and key not in extras:
+                extras.append(key)
+    columns.extend(sorted(extras))
+    return columns
+
+
+def render_log_lines_as_table(lines: Sequence[dict]) -> str:
+    normalized = [_normalize_line_entry(line) for line in lines if isinstance(line, dict)]
+    if not normalized:
+        return ""
+    columns = _determine_columns(normalized)
+    header = "\t".join(columns)
+    rows = [
+        "\t".join(_stringify(entry.get(column, "")) for column in columns)
+        for entry in normalized
+    ]
+    return "\n".join([header, *rows])
+
+
+def parse_log_entries(content: str) -> List[dict]:
+    content = content.strip()
+    if not content:
+        return []
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("lines"), list):
+        lines = [line for line in payload.get("lines", []) if isinstance(line, dict)]
+        if not lines:
+            return []
+        return [_normalize_line_entry(line) for line in lines]
+    return _parse_plaintext_entries(content)
+
+
+def prepare_log_content(content: str) -> tuple[str, List[dict]]:
+    content = content or ""
+    stripped = content.strip()
+    if not stripped:
+        return "", []
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("lines"), list):
+        lines = [line for line in payload.get("lines", []) if isinstance(line, dict)]
+        table = render_log_lines_as_table(lines)
+        entries = [_normalize_line_entry(line) for line in lines]
+        return table, entries
+    entries = _parse_plaintext_entries(content)
+    return content, entries
 
 
 def persist_log_entries(
