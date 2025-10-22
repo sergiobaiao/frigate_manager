@@ -1100,6 +1100,12 @@ def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager)
         session.add(check)
         session.commit()
         session.refresh(check)
+        logger.info(
+            "Created %s host check %s for host id %s",
+            trigger,
+            check.id,
+            host_id,
+        )
         return check
 
 
@@ -1197,6 +1203,9 @@ async def run_host_check(
             }
         host = session.get(Host, check.host_id)
     if not host:
+        logger.warning(
+            "Host id %s for check %s was removed before execution", check.host_id, check_id
+        )
         recorder.log("Host was removed before the check could run.")
         recorder.complete("error", "Host not found")
         return {
@@ -1206,6 +1215,12 @@ async def run_host_check(
             "notification": None,
         }
     if check.trigger == "scheduled" and not host.enabled:
+        logger.info(
+            "Skipping scheduled check %s for disabled host %s (id=%s)",
+            check.id,
+            host.name,
+            host.id,
+        )
         recorder.log("Host disabled; skipping scheduled check.")
         recorder.skip("Host disabled")
         return {
@@ -1215,6 +1230,13 @@ async def run_host_check(
             "notification": None,
         }
 
+    logger.info(
+        "Starting %s host check %s for %s (%s)",
+        check.trigger,
+        check.id,
+        host.name,
+        host.base_url,
+    )
     recorder.start(host.name)
     try:
         result = await check_host(host, config_manager, recorder=recorder, notify=notify)
@@ -1235,16 +1257,30 @@ async def run_host_check(
         failure_event = result["failure_event"]
         failure_id = failure_event.id if failure_event else None
         recorder.complete("failure", summary, failure_event_id=failure_id)
+        logger.info(
+            "Host check %s for %s detected failure: %s",
+            check.id,
+            host.name,
+            summary,
+        )
     elif result["status"] == "success":
         recorder.complete("success", summary)
+        logger.info("Host check %s for %s succeeded: %s", check.id, host.name, summary)
     else:
         recorder.complete("error", summary)
+        logger.warning("Host check %s for %s ended with status %s", check.id, host.name, result["status"])
 
     return result
 
 
 def queue_host_check(host_id: int, config_manager: ConfigManager, trigger: str = "manual") -> HostCheck:
     check = create_host_check(host_id, trigger, config_manager)
+    logger.info(
+        "Queueing %s host check %s for host id %s",
+        trigger,
+        check.id,
+        host_id,
+    )
     asyncio.create_task(
         run_host_check(check.id, config_manager),
         name=f"host-check-{host_id}-{trigger}",
@@ -1263,6 +1299,7 @@ async def check_host(
     config_timezone = config_manager.timezone
     timestamp = now_tz(config_timezone)
     hostname = host.name
+    logger.info("Beginning dashboard inspection for host %s (%s)", hostname, host.base_url)
     first_screenshot: Optional[str] = None
     second_screenshot: Optional[str] = None
     trace_files: List[str] = []
@@ -1321,6 +1358,11 @@ async def check_host(
             recorder.log(
                 f"Initial scan detected {len(initial_failed)} failing cameras via dashboard inspection"
             )
+        logger.info(
+            "Initial scan for host %s detected %s failing camera(s)",
+            hostname,
+            len(initial_failed),
+        )
         if not initial_failed:
             if debug_mode and initial_trace_started:
                 trace_path = TRACE_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial-trace.zip"
@@ -1328,6 +1370,7 @@ async def check_host(
                     trace_files.append(saved)
             await context.close()
             await browser.close()
+            logger.info("No issues detected for host %s during initial scan", hostname)
             return {
                 "status": "success",
                 "summary": "No failing cameras detected",
@@ -1353,6 +1396,11 @@ async def check_host(
 
     if recorder:
         recorder.log(f"Waiting {config.retry_delay_minutes} minutes before retry")
+    logger.info(
+        "Waiting %s minute(s) before retrying host %s",
+        config.retry_delay_minutes,
+        hostname,
+    )
     await asyncio.sleep(config.retry_delay_minutes * 60)
 
     async with async_playwright() as p:
@@ -1416,6 +1464,11 @@ async def check_host(
             recorder.log(
                 f"Retry detected {len(retry_failed_ids)} failing cameras via dashboard inspection"
             )
+        logger.info(
+            "Retry scan for host %s detected %s failing camera(s)",
+            hostname,
+            len(retry_failed_ids),
+        )
         retry_timestamp = now_tz(config_timezone)
         second_path = SCREENSHOT_DIR / f"{hostname}-{retry_timestamp.strftime('%Y%m%dT%H%M%S')}-retry.png"
         second_screenshot = await _fetch_page_screenshot(page, second_path)
@@ -1448,6 +1501,11 @@ async def check_host(
             "Failure persists for %s cameras: %s"
             % (len(camera_ids), ", ".join(camera_ids))
         )
+    logger.info(
+        "Confirmed failure for host %s affecting camera(s): %s",
+        hostname,
+        ", ".join(camera_ids),
+    )
 
     services = ["go2rtc", "nginx", "frigate"]
     log_files: List[str] = []
@@ -1533,6 +1591,8 @@ async def check_host(
             logger.exception("Failed to deliver failure notification: %s", exc)
             if recorder:
                 recorder.log(f"Notification delivery failed: {exc}")
+        else:
+            logger.info("Notification queued for host %s", hostname)
 
     return {
         "status": "failure",
@@ -1546,13 +1606,23 @@ async def run_monitoring(config_manager: ConfigManager) -> None:
     with get_session() as session:
         hosts = session.exec(select(Host).where(Host.enabled == True)).all()  # noqa: E712
     if not hosts:
+        logger.info("No enabled hosts found; skipping monitoring cycle")
         return
+
+    host_names = ", ".join(sorted(host.name for host in hosts))
+    logger.info(
+        "Starting monitoring cycle for %s host(s): %s",
+        len(hosts),
+        host_names,
+    )
 
     batch_size = max(1, min(len(hosts), HOST_CHECK_BATCH_SIZE))
     pending_notifications: List[FailureNotification] = []
 
     for start in range(0, len(hosts), batch_size):
         chunk = hosts[start : start + batch_size]
+        chunk_names = ", ".join(host.name for host in chunk)
+        logger.info("Queueing checks for host batch: %s", chunk_names)
         tasks: List[asyncio.Task[HostCheckResult]] = []
         for host in chunk:
             check = create_host_check(host.id, "scheduled", config_manager)
@@ -1565,16 +1635,32 @@ async def run_monitoring(config_manager: ConfigManager) -> None:
         if not tasks:
             continue
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
+        for host, result in zip(chunk, results):
             if isinstance(result, Exception):  # pragma: no cover - logging
-                logger.exception("Monitoring task raised an exception", exc_info=result)
+                logger.exception(
+                    "Monitoring task raised an exception for host %s", host.name, exc_info=result
+                )
                 continue
             notification = result.get("notification")
             if notification:
                 pending_notifications.append(notification)
+            logger.info(
+                "Completed scheduled check for %s with status %s (%s)",
+                host.name,
+                result.get("status"),
+                result.get("summary"),
+            )
 
     if pending_notifications:
         try:
             await _dispatch_notifications(config_manager, pending_notifications)
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Failed to deliver consolidated notifications", exc_info=exc)
+        else:
+            logger.info(
+                "Dispatched %s consolidated notification(s) for hosts: %s",
+                len(pending_notifications),
+                ", ".join({notification["host_name"] for notification in pending_notifications}),
+            )
+
+    logger.info("Monitoring cycle complete")
