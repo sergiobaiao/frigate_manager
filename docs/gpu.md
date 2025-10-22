@@ -17,22 +17,18 @@ The configuration examples below show the appropriate section to add under the `
 
 ## 2. Compose Plugin (v2) configuration
 
-Compose V2 understands [device requests](https://docs.docker.com/compose/gpu-support/) natively. Append the following block to the `backend` service **after** removing the legacy top-level `version:` key from your compose file. When the file still declares `version: "3.x"`, the CLI validates against the older schema that rejects `device_requests`, which is what triggers errors such as `Additional property device_requests is not allowed`.
+Compose V2 understands [device requests](https://docs.docker.com/compose/gpu-support/) natively. Append the following block to the `backend` service:
 
 ```yaml
-# docker-compose.yml
 services:
   backend:
-    # existing configuration ...
     device_requests:
       - driver: nvidia
         count: 1          # or "all" to pass every GPU
         capabilities: [gpu]
 ```
 
-After editing the file, run `docker compose config` to confirm that the syntax is valid. If you still see the validation error, double-check that the `version:` header is gone and that you are running the Compose Plugin (the command prints `Docker Compose version v2.x`).
-
-If you previously saw the error `Additional property device_requests is not allowed`, ensure the `version:` header has been removed. If the error persists, your Compose installation is still on V1—see the next section.
+If you previously saw the error `Additional property device_requests is not allowed`, your Compose installation is still on V1—see the next section.
 
 ## 3. Legacy docker-compose (v1) configuration
 
