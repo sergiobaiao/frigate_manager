@@ -19,6 +19,7 @@ class MonitorScheduler:
         self.scheduler = AsyncIOScheduler(timezone=manager.timezone)
 
     def start(self) -> None:
+        self.max_instances = self._load_max_instances()
         interval = self.manager.get().check_interval_minutes
         self.scheduler.add_job(
             self._run_monitoring,
@@ -37,27 +38,47 @@ class MonitorScheduler:
         self.start()
 
     async def _run_monitoring(self) -> None:
-        await run_monitoring(self.manager)
+        # Reload the environment override on every execution so that a
+        # configuration change takes effect without recreating the scheduler.
+        self.max_instances = self._load_max_instances()
+        await run_monitoring(
+            self.manager, max_concurrent_checks=self.max_instances
+        )
 
     def shutdown(self) -> None:
         if self.scheduler.running:
             self.scheduler.shutdown()
 
     def _load_max_instances(self) -> int:
-        raw_value = os.getenv("MONITOR_MAX_INSTANCES")
+        raw_value, source = self._read_max_instances_variable()
         if raw_value is None:
             return 1
         try:
             parsed = int(raw_value)
         except ValueError:
             logger.warning(
-                "Invalid MONITOR_MAX_INSTANCES value '%s'; defaulting to 1.", raw_value
+                "Invalid %s value '%s'; defaulting to 1.", source, raw_value
             )
             return 1
         if parsed < 1:
             logger.warning(
-                "MONITOR_MAX_INSTANCES must be at least 1; defaulting to 1 (got %s).",
+                "%s must be at least 1; defaulting to 1 (got %s).",
+                source,
                 parsed,
             )
             return 1
         return parsed
+
+    @staticmethod
+    def _read_max_instances_variable() -> tuple[str | None, str]:
+        raw_value = os.getenv("MONITOR_MAX_INSTANCES")
+        if raw_value is not None:
+            return raw_value, "MONITOR_MAX_INSTANCES"
+        legacy_value = os.getenv("MAX_INSTANCES")
+        if legacy_value is not None:
+            logger.info(
+                "Using MAX_INSTANCES environment variable for monitor scheduling; "
+                "prefer MONITOR_MAX_INSTANCES for future configuration.",
+            )
+            return legacy_value, "MAX_INSTANCES"
+        return None, "MONITOR_MAX_INSTANCES"

@@ -1573,13 +1573,19 @@ async def check_host(
     }
 
 
-async def run_monitoring(config_manager: ConfigManager) -> None:
+async def run_monitoring(
+    config_manager: ConfigManager, *, max_concurrent_checks: int | None = None
+) -> None:
     with get_session() as session:
         hosts = session.exec(select(Host).where(Host.enabled == True)).all()  # noqa: E712
     if not hosts:
         return
 
-    batch_size = max(1, min(len(hosts), HOST_CHECK_BATCH_SIZE))
+    if max_concurrent_checks is None:
+        concurrency_limit = HOST_CHECK_BATCH_SIZE
+    else:
+        concurrency_limit = max(1, max_concurrent_checks)
+    batch_size = max(1, min(len(hosts), concurrency_limit))
     pending_notifications: List[FailureNotification] = []
 
     for start in range(0, len(hosts), batch_size):
