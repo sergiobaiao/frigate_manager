@@ -19,6 +19,7 @@ class AppConfig(BaseModel):
     check_interval_minutes: int = Field(10, alias="CHECK_INTERVAL_MINUTES")
     retry_delay_minutes: int = Field(5, alias="RETRY_DELAY_MINUTES")
     debug_mode: bool = Field(False, alias="DEBUG_MODE")
+    use_gpu_for_ocr: bool = Field(False, alias="USE_GPU_FOR_OCR")
 
     class Config:
         allow_population_by_field_name = True

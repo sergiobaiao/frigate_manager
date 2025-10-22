@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import threading
+import zipfile
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, TypedDict
@@ -21,7 +22,7 @@ from ..services.logs import (
     prepare_log_content,
     save_log_file,
 )
-from ..services.notifications import send_media, send_message
+from ..services.notifications import send_media, send_media_group, send_message
 from ..utils.paths import LOG_DIR, SCREENSHOT_DIR, TRACE_DIR
 from ..utils.playwright_settings import PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT
 from ..utils.timezone import now_tz
@@ -31,6 +32,8 @@ STREAM_BLOCK_PATTERNS = [
     "**/live/mjpeg/**",
     "**/live/webrtc/**",
 ]
+
+HOST_CHECK_BATCH_SIZE = 5
 
 
 async def _block_streaming_requests(page, recorder=None) -> None:
@@ -57,17 +60,31 @@ _OCR_BACKEND_ERROR: Optional[str] = None
 _PYTESSERACT: Any = None
 _EASYOCR: Any = None
 _EASYOCR_READER: Any = None
+_OCR_GPU_ENABLED: Optional[bool] = None
 
 
-def _ensure_ocr_backend() -> Optional[str]:
-    global _OCR_BACKEND, _OCR_BACKEND_ERROR, _PYTESSERACT, _EASYOCR, _EASYOCR_READER
+def _ensure_ocr_backend(use_gpu: bool) -> Optional[str]:
+    global _OCR_BACKEND, _OCR_BACKEND_ERROR, _PYTESSERACT, _EASYOCR, _EASYOCR_READER, _OCR_GPU_ENABLED
 
-    if _OCR_BACKEND is not None or _OCR_BACKEND_ERROR is not None:
+    if _OCR_BACKEND == "easyocr" and _OCR_GPU_ENABLED is not None and _OCR_GPU_ENABLED != use_gpu:
+        with _OCR_BACKEND_LOCK:
+            if _OCR_BACKEND == "easyocr" and _OCR_GPU_ENABLED != use_gpu:
+                _OCR_BACKEND = None
+                _OCR_BACKEND_ERROR = None
+                _EASYOCR = None
+                _EASYOCR_READER = None
+                _OCR_GPU_ENABLED = None
+
+    if _OCR_BACKEND is not None and (_OCR_BACKEND != "easyocr" or _OCR_GPU_ENABLED == use_gpu):
         return _OCR_BACKEND
+    if _OCR_BACKEND_ERROR is not None and (_OCR_BACKEND != "easyocr" or _OCR_GPU_ENABLED == use_gpu):
+        return None
 
     with _OCR_BACKEND_LOCK:
-        if _OCR_BACKEND is not None or _OCR_BACKEND_ERROR is not None:
+        if _OCR_BACKEND is not None and (_OCR_BACKEND != "easyocr" or _OCR_GPU_ENABLED == use_gpu):
             return _OCR_BACKEND
+        if _OCR_BACKEND_ERROR is not None and (_OCR_BACKEND != "easyocr" or _OCR_GPU_ENABLED == use_gpu):
+            return None
 
         backend_errors: List[str] = []
 
@@ -77,6 +94,7 @@ def _ensure_ocr_backend() -> Optional[str]:
             pytesseract.get_tesseract_version()
             _PYTESSERACT = pytesseract
             _OCR_BACKEND = "pytesseract"
+            _OCR_GPU_ENABLED = False
             logger.debug("Using pytesseract for camera failure OCR checks")
             return _OCR_BACKEND
         except Exception as exc:  # pragma: no cover - optional dependency
@@ -90,9 +108,13 @@ def _ensure_ocr_backend() -> Optional[str]:
             import easyocr  # type: ignore
 
             _EASYOCR = easyocr
-            _EASYOCR_READER = easyocr.Reader(["en"], gpu=False)
+            _EASYOCR_READER = easyocr.Reader(["en"], gpu=use_gpu)
             _OCR_BACKEND = "easyocr"
-            logger.info("Falling back to easyocr for camera failure OCR checks")
+            _OCR_GPU_ENABLED = use_gpu
+            logger.info(
+                "Falling back to easyocr for camera failure OCR checks (gpu=%s)",
+                use_gpu,
+            )
             return _OCR_BACKEND
         except Exception as exc:  # pragma: no cover - optional dependency
             backend_errors.append(f"easyocr: {exc}")
@@ -101,6 +123,7 @@ def _ensure_ocr_backend() -> Optional[str]:
                 "; ".join(backend_errors),
             )
             _OCR_BACKEND_ERROR = "; ".join(backend_errors)
+            _OCR_GPU_ENABLED = None
             return None
 
 
@@ -210,10 +233,110 @@ def _contains_failure_text(text: str, failure_texts: List[str]) -> bool:
     return any(snippet in lower for snippet in failure_texts)
 
 
-class HostCheckResult(TypedDict):
+class FailureNotification(TypedDict):
+    host_id: int
+    host_name: str
+    camera_ids: List[str]
+    failure_start: Optional[datetime]
+    first_screenshot: Optional[str]
+    second_screenshot: Optional[str]
+    log_files: List[str]
+    summary: str
+    failure_event_id: Optional[int]
+
+
+class HostCheckResultBase(TypedDict):
     status: Literal["success", "failure", "error"]
     summary: str
     failure_event: Optional[FailureEvent]
+
+
+class HostCheckResult(HostCheckResultBase, total=False):
+    notification: Optional[FailureNotification]
+
+
+async def _dispatch_notifications(
+    config_manager: ConfigManager, notifications: List[FailureNotification]
+) -> None:
+    if not notifications:
+        return
+
+    config = config_manager.get()
+    timezone = config_manager.timezone
+    message_lines: List[str] = ["<b>Frigate Manager Alerts</b>"]
+
+    for payload in notifications:
+        camera_count = len(payload.get("camera_ids", []))
+        identifiers = ", ".join(payload.get("camera_ids", []))
+        line = f"• <code>{payload['host_name']}</code>: {camera_count} failing camera(s)"
+        if identifiers:
+            line += f" — {identifiers}"
+        message_lines.append(line)
+
+        failure_start = payload.get("failure_start")
+        if failure_start:
+            localized = failure_start.astimezone(timezone)
+            message_lines.append(
+                f"  Estimated start: {localized.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+            )
+
+    if config.mention_name:
+        message_lines.append(config.mention_name)
+    if config.mention_user_ids:
+        ids = [uid.strip() for uid in config.mention_user_ids.split(",") if uid.strip()]
+        if ids:
+            mentions = " ".join(f"<a href=\"tg://user?id={uid}\">.</a>" for uid in ids)
+            message_lines.append(mentions)
+
+    message = "\n".join(message_lines)
+
+    photo_paths: List[str] = []
+    log_paths: List[str] = []
+    for payload in notifications:
+        for path in (payload.get("first_screenshot"), payload.get("second_screenshot")):
+            if path and Path(path).exists():
+                photo_paths.append(path)
+        for path in payload.get("log_files", []):
+            if path and Path(path).exists():
+                log_paths.append(path)
+
+    archive_path: Optional[str] = None
+    if log_paths:
+        timestamp = now_tz(timezone)
+        archive_target = LOG_DIR / f"alert-logs-{timestamp.strftime('%Y%m%dT%H%M%S')}.zip"
+        archive_target.parent.mkdir(parents=True, exist_ok=True)
+        unique_paths = []
+        seen_paths: set[str] = set()
+        for path in log_paths:
+            if path not in seen_paths:
+                seen_paths.add(path)
+                unique_paths.append(path)
+        if unique_paths:
+            with zipfile.ZipFile(
+                archive_target, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for path in unique_paths:
+                    file_path = Path(path)
+                    if file_path.exists():
+                        archive.write(str(file_path), arcname=file_path.name)
+            archive_path = str(archive_target)
+
+    if photo_paths:
+        await send_media_group(config, photo_paths, caption=message)
+        if archive_path:
+            await send_media(config, [archive_path], media_type="document")
+        return
+
+    if archive_path:
+        await send_media(
+            config,
+            [archive_path],
+            caption=message,
+            media_type="document",
+        )
+        return
+
+    await send_message(config, message)
 
 
 async def _fetch_page_screenshot(page, output_path: Path) -> str:
@@ -255,7 +378,7 @@ async def _stop_tracing(
     return saved_path
 
 
-async def _detect_failed_cameras(page) -> List[str]:
+async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     await page.wait_for_selector("body", timeout=30000)
     label_selectors = [
         '[data-testid="camera-title"]',
@@ -914,7 +1037,7 @@ async def _detect_failed_cameras(page) -> List[str]:
                 ocr_candidates.append(entry)
 
         if ocr_candidates:
-            backend = _ensure_ocr_backend()
+            backend = _ensure_ocr_backend(use_gpu_for_ocr)
             prioritized: List[Dict[str, Any]] = []
             prioritized.extend(
                 [candidate for candidate in ocr_candidates if candidate.get("imageHints")]
@@ -1102,30 +1225,52 @@ class HostCheckRecorder:
         )
 
 
-async def run_host_check(check_id: int, config_manager: ConfigManager) -> None:
+async def run_host_check(
+    check_id: int, config_manager: ConfigManager, *, notify: bool = True
+) -> HostCheckResult:
     recorder = HostCheckRecorder(check_id, config_manager)
     with get_session() as session:
         check = session.get(HostCheck, check_id)
         if not check:
-            return
+            return {
+                "status": "error",
+                "summary": "Host check not found",
+                "failure_event": None,
+                "notification": None,
+            }
         host = session.get(Host, check.host_id)
     if not host:
         recorder.log("Host was removed before the check could run.")
         recorder.complete("error", "Host not found")
-        return
+        return {
+            "status": "error",
+            "summary": "Host not found",
+            "failure_event": None,
+            "notification": None,
+        }
     if check.trigger == "scheduled" and not host.enabled:
         recorder.log("Host disabled; skipping scheduled check.")
         recorder.skip("Host disabled")
-        return
+        return {
+            "status": "error",
+            "summary": "Host disabled",
+            "failure_event": None,
+            "notification": None,
+        }
 
     recorder.start(host.name)
     try:
-        result = await check_host(host, config_manager, recorder=recorder)
+        result = await check_host(host, config_manager, recorder=recorder, notify=notify)
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Monitoring task raised an exception for host %s", host.name, exc_info=exc)
         recorder.log(f"Unexpected error: {exc}")
         recorder.complete("error", "Unexpected error during check")
-        return
+        return {
+            "status": "error",
+            "summary": "Unexpected error during check",
+            "failure_event": None,
+            "notification": None,
+        }
 
     summary = result["summary"]
     recorder.log(summary)
@@ -1137,6 +1282,8 @@ async def run_host_check(check_id: int, config_manager: ConfigManager) -> None:
         recorder.complete("success", summary)
     else:
         recorder.complete("error", summary)
+
+    return result
 
 
 def queue_host_check(host_id: int, config_manager: ConfigManager, trigger: str = "manual") -> HostCheck:
@@ -1153,6 +1300,7 @@ async def check_host(
     config_manager: ConfigManager,
     *,
     recorder: Optional[HostCheckRecorder] = None,
+    notify: bool = True,
 ) -> HostCheckResult:
     config = config_manager.get()
     config_timezone = config_manager.timezone
@@ -1207,8 +1355,11 @@ async def check_host(
                 "status": "error",
                 "summary": "Unable to load Frigate dashboard",
                 "failure_event": None,
+                "notification": None,
             }
-        initial_failed = await _detect_failed_cameras(page)
+        initial_failed = await _detect_failed_cameras(
+            page, use_gpu_for_ocr=config.use_gpu_for_ocr
+        )
         if recorder:
             recorder.log(
                 f"Initial scan detected {len(initial_failed)} failing cameras via dashboard inspection"
@@ -1224,6 +1375,7 @@ async def check_host(
                 "status": "success",
                 "summary": "No failing cameras detected",
                 "failure_event": None,
+                "notification": None,
             }
         first_path = SCREENSHOT_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial.png"
         first_screenshot = await _fetch_page_screenshot(page, first_path)
@@ -1289,8 +1441,11 @@ async def check_host(
                 "status": "error",
                 "summary": "Retry failed to load dashboard",
                 "failure_event": None,
+                "notification": None,
             }
-        detected_retry_ids = await _detect_failed_cameras(page)
+        detected_retry_ids = await _detect_failed_cameras(
+            page, use_gpu_for_ocr=config.use_gpu_for_ocr
+        )
         retry_failed_ids: List[str] = []
         seen_retry_ids: set[str] = set()
         for camera_id in detected_retry_ids:
@@ -1327,6 +1482,7 @@ async def check_host(
             "status": "success",
             "summary": "Issue cleared before retry completed",
             "failure_event": None,
+            "notification": None,
         }
 
     camera_ids = retry_failed_ids
@@ -1401,67 +1557,67 @@ async def check_host(
     if recorder:
         recorder.log("Failure recorded and notifications scheduled")
 
-    message_lines = [
-        f"<b>Frigate Manager Alert</b>",
-        f"Host: <code>{hostname}</code>",
-        f"Affected cameras: {len(camera_ids)}",
-        f"Identifiers: {', '.join(camera_ids)}",
-    ]
-    if normalized_failure_start:
-        message_lines.append(
-            f"Estimated start: {normalized_failure_start.strftime('%Y-%m-%d %H:%M:%S')} GMT-3"
-        )
-    config = config_manager.get()
-    if config.mention_name:
-        message_lines.append(config.mention_name)
-    if config.mention_user_ids:
-        ids = [uid.strip() for uid in config.mention_user_ids.split(",") if uid.strip()]
-        mentions = " ".join(f"<a href=\"tg://user?id={uid}\">.</a>" for uid in ids)
-        message_lines.append(mentions)
+    notification: FailureNotification = {
+        "host_id": host.id,
+        "host_name": hostname,
+        "camera_ids": camera_ids,
+        "failure_start": normalized_failure_start,
+        "first_screenshot": first_screenshot,
+        "second_screenshot": second_screenshot,
+        "log_files": list(log_files),
+        "summary": summary,
+        "failure_event_id": failure_event.id,
+    }
 
-    try:
-        await send_message(config, "\n".join(message_lines))
-    except Exception as exc:  # pragma: no cover - network
-        logger.exception("Failed to send Telegram message: %s", exc)
-        if recorder:
-            recorder.log(f"Telegram message failed: {exc}")
-
-    if first_screenshot and second_screenshot:
+    if notify:
         try:
-            await send_media(
-                config,
-                [first_screenshot, second_screenshot],
-                media_type="photo",
-            )
-        except Exception as exc:  # pragma: no cover - network
-            logger.exception("Failed to send Telegram screenshots: %s", exc)
+            await _dispatch_notifications(config_manager, [notification])
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Failed to deliver failure notification: %s", exc)
             if recorder:
-                recorder.log(f"Screenshot upload failed: {exc}")
-
-    try:
-        await send_media(config, log_files, media_type="document")
-    except Exception as exc:  # pragma: no cover - network
-        logger.exception("Failed to send Telegram logs: %s", exc)
-        if recorder:
-            recorder.log(f"Log upload failed: {exc}")
+                recorder.log(f"Notification delivery failed: {exc}")
 
     return {
         "status": "failure",
         "summary": summary,
         "failure_event": failure_event,
+        "notification": notification,
     }
 
 
 async def run_monitoring(config_manager: ConfigManager) -> None:
     with get_session() as session:
         hosts = session.exec(select(Host).where(Host.enabled == True)).all()  # noqa: E712
-    tasks: List[asyncio.Task[None]] = []
-    for host in hosts:
-        check = create_host_check(host.id, "scheduled", config_manager)
-        tasks.append(asyncio.create_task(run_host_check(check.id, config_manager)))
-    if not tasks:
+    if not hosts:
         return
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for result in results:
-        if isinstance(result, Exception):  # pragma: no cover - logging
-            logger.exception("Monitoring task raised an exception", exc_info=result)
+
+    batch_size = max(1, min(len(hosts), HOST_CHECK_BATCH_SIZE))
+    pending_notifications: List[FailureNotification] = []
+
+    for start in range(0, len(hosts), batch_size):
+        chunk = hosts[start : start + batch_size]
+        tasks: List[asyncio.Task[HostCheckResult]] = []
+        for host in chunk:
+            check = create_host_check(host.id, "scheduled", config_manager)
+            tasks.append(
+                asyncio.create_task(
+                    run_host_check(check.id, config_manager, notify=False),
+                    name=f"host-check-{host.id}-scheduled",
+                )
+            )
+        if not tasks:
+            continue
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):  # pragma: no cover - logging
+                logger.exception("Monitoring task raised an exception", exc_info=result)
+                continue
+            notification = result.get("notification")
+            if notification:
+                pending_notifications.append(notification)
+
+    if pending_notifications:
+        try:
+            await _dispatch_notifications(config_manager, pending_notifications)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Failed to deliver consolidated notifications", exc_info=exc)

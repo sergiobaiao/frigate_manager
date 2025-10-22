@@ -12,6 +12,7 @@ class ConfigRead(BaseModel):
     CHECK_INTERVAL_MINUTES: int
     RETRY_DELAY_MINUTES: int
     DEBUG_MODE: bool
+    USE_GPU_FOR_OCR: bool
 
 
 class ConfigUpdate(BaseModel):
@@ -23,6 +24,7 @@ class ConfigUpdate(BaseModel):
     CHECK_INTERVAL_MINUTES: int | None = None
     RETRY_DELAY_MINUTES: int | None = None
     DEBUG_MODE: bool | None = None
+    USE_GPU_FOR_OCR: bool | None = None
 
 
 class ScreenshotTestRequest(BaseModel):
