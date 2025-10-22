@@ -20,6 +20,15 @@ const DashboardPage = () => {
     return Array.from(map.entries()).map(([date, total]) => ({ date, total }));
   }, [failuresQuery.data]);
 
+  const offlineCameraCount = useMemo(() => {
+    if (!failuresQuery.data) return 0;
+    const uniqueCameraIds = new Set<string>();
+    failuresQuery.data.forEach((failure) => {
+      failure.camera_ids.forEach((cameraId) => uniqueCameraIds.add(cameraId));
+    });
+    return uniqueCameraIds.size;
+  }, [failuresQuery.data]);
+
   return (
     <div className="grid" style={{ gap: '2rem' }}>
       <div className="grid three-columns">
@@ -29,8 +38,9 @@ const DashboardPage = () => {
           footer="Total events captured"
         />
         <StatsCard
-          label="Impacted cameras"
-          value={failuresQuery.data?.reduce((sum, item) => sum + item.failure_count, 0) ?? 0}
+          label="Offline cameras"
+          value={offlineCameraCount}
+          footer="Currently unavailable"
         />
         <StatsCard
           label="Active hosts"
