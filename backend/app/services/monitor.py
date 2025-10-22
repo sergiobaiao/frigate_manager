@@ -230,7 +230,7 @@ def _contains_failure_text(text: str, failure_texts: List[str]) -> bool:
     if not text:
         return False
     lower = text.lower()
-    return any(snippet in lower for snippet in failure_texts)
+    return all(snippet in lower for snippet in failure_texts)
 
 
 class FailureNotification(TypedDict):
@@ -420,15 +420,7 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     ]
     failure_texts = [
         "no frames have been received",
-        "no frames received",
         "check error logs",
-        "error logs",
-        "camera offline",
-        "camera is offline",
-        "unable to load camera",
-        "disconnected",
-        "lost connection",
-        "no signal",
     ]
     failure_image_hints = [
         "no-frame",
@@ -489,12 +481,12 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                     return element.dataset.fmDetectorId;
                 };
 
-                const isFailureText = (content) => {
+                const containsOfflineMessage = (content) => {
                     if (!content) {
                         return false;
                     }
                     const lower = String(content).toLowerCase();
-                    return normalizedTexts.some((snippet) => lower.includes(snippet));
+                    return normalizedTexts.every((snippet) => lower.includes(snippet));
                 };
 
                 const ariaLabelFromIds = (element, attribute) => {
@@ -789,39 +781,39 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                         }
 
                         const textContent = element.innerText || element.textContent;
-                        if (isFailureText(textContent)) {
+                        if (containsOfflineMessage(textContent)) {
                             pushUnique(info.textMatches, String(textContent).trim().slice(0, 160));
                         } else if (element.getAttribute) {
                             const ariaLabel = element.getAttribute('aria-label');
-                            if (isFailureText(ariaLabel)) {
+                            if (containsOfflineMessage(ariaLabel)) {
                                 pushUnique(info.textMatches, ariaLabel.trim().slice(0, 160));
                             } else if (ariaLabel && ariaLabel.toLowerCase().includes('loading')) {
                                 pushUnique(info.stateMatches, `aria:${ariaLabel.trim().slice(0, 80)}`);
                             }
                             const ariaDescription = element.getAttribute('aria-description');
-                            if (isFailureText(ariaDescription)) {
+                            if (containsOfflineMessage(ariaDescription)) {
                                 pushUnique(info.textMatches, ariaDescription.trim().slice(0, 160));
                             } else if (ariaDescription && ariaDescription.toLowerCase().includes('loading')) {
                                 pushUnique(info.stateMatches, `aria:${ariaDescription.trim().slice(0, 80)}`);
                             }
                             const labelledBy = ariaLabelFromIds(element, 'aria-labelledby');
-                            if (isFailureText(labelledBy)) {
+                            if (containsOfflineMessage(labelledBy)) {
                                 pushUnique(info.textMatches, labelledBy.slice(0, 160));
                             } else if (labelledBy && labelledBy.toLowerCase().includes('loading')) {
                                 pushUnique(info.stateMatches, `aria:${labelledBy.slice(0, 80)}`);
                             }
                             const describedBy = ariaLabelFromIds(element, 'aria-describedby');
-                            if (isFailureText(describedBy)) {
+                            if (containsOfflineMessage(describedBy)) {
                                 pushUnique(info.textMatches, describedBy.slice(0, 160));
                             } else if (describedBy && describedBy.toLowerCase().includes('loading')) {
                                 pushUnique(info.stateMatches, `aria:${describedBy.slice(0, 80)}`);
                             }
                             const titleAttr = element.getAttribute('title');
-                            if (isFailureText(titleAttr)) {
+                            if (containsOfflineMessage(titleAttr)) {
                                 pushUnique(info.textMatches, titleAttr.trim().slice(0, 160));
                             }
                             const altAttr = element.getAttribute('alt');
-                            if (isFailureText(altAttr)) {
+                            if (containsOfflineMessage(altAttr)) {
                                 pushUnique(info.textMatches, altAttr.trim().slice(0, 160));
                             }
 
@@ -980,8 +972,6 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     attempts = 10
     delay_ms = 1000
     last_result: List[str] = []
-    hidden_visual_counts: Dict[str, int] = {}
-    hidden_visual_threshold = 6
     for attempt in range(attempts):
         scan_results = await _scan_once()
         seen_identifiers: set[str] = set()
@@ -994,41 +984,20 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                 continue
 
             text_matches = entry.get("textMatches") or []
-            raw_state_matches = entry.get("stateMatches") or []
-            spinner_matches = [
-                state
-                for state in raw_state_matches
-                if "spinner" in state.lower() or "loading" in state.lower()
-            ]
-            state_matches = [
-                state for state in raw_state_matches if state not in spinner_matches
-            ]
+            state_matches = entry.get("stateMatches") or []
 
-            if text_matches or state_matches:
+            if text_matches:
                 if identifier not in seen_identifiers:
                     seen_identifiers.add(identifier)
                     failures.append(identifier)
                 continue
 
-            if entry.get("hasVisualContent"):
-                hidden_visual_counts.pop(identifier, None)
-            else:
-                hidden_visuals = entry.get("hiddenVisuals") or []
-                if (hidden_visuals or spinner_matches) and attempt >= 2:
-                    count = hidden_visual_counts.get(identifier, 0) + 1
-                    hidden_visual_counts[identifier] = count
-                    if count >= hidden_visual_threshold and identifier not in seen_identifiers:
-                        seen_identifiers.add(identifier)
-                        failures.append(identifier)
-                        logger.debug(
-                            "Detected failed camera due to missing visual content (%s): hidden=%s states=%s",
-                            identifier,
-                            ",".join(str(item) for item in hidden_visuals[:5]) or "none",
-                            ",".join(spinner_matches[:5]) or "none",
-                        )
-                        continue
-                else:
-                    hidden_visual_counts.pop(identifier, None)
+            if state_matches:
+                logger.debug(
+                    "Ignoring state-only offline indicator for %s without offline message: %s",
+                    identifier,
+                    ",".join(str(item) for item in state_matches[:5]) or "none",
+                )
 
             if entry.get("containerId"):
                 ocr_candidates.append(entry)
