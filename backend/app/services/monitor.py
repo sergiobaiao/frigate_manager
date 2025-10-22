@@ -379,7 +379,12 @@ async def _stop_tracing(
     return saved_path
 
 
-async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
+async def _detect_failed_cameras(
+    page,
+    *,
+    use_gpu_for_ocr: bool,
+    recorder: Optional["HostCheckRecorder"] = None,
+) -> List[str]:
     await page.wait_for_selector("body", timeout=30000)
     label_selectors = [
         '[data-testid="camera-title"]',
@@ -974,6 +979,8 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     attempts = 10
     delay_ms = 1000
     last_result: List[str] = []
+    backend_logged = False
+    backend_missing_logged = False
     for attempt in range(attempts):
         scan_results = await _scan_once()
         seen_identifiers: set[str] = set()
@@ -1006,6 +1013,19 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
 
         if ocr_candidates:
             backend = _ensure_ocr_backend(use_gpu_for_ocr)
+            if recorder and backend and not backend_logged:
+                recorder.log(
+                    "Using %s OCR backend to inspect %s candidate camera(s)"
+                    % (backend, len(ocr_candidates))
+                )
+                backend_logged = True
+            if recorder and not backend and not backend_missing_logged:
+                reason = _OCR_BACKEND_ERROR or "OCR dependencies unavailable"
+                recorder.log(
+                    "Skipping OCR checks for %s camera candidate(s): %s"
+                    % (len(ocr_candidates), reason)
+                )
+                backend_missing_logged = True
             prioritized: List[Dict[str, Any]] = []
             prioritized.extend(
                 [candidate for candidate in ocr_candidates if candidate.get("imageHints")]
@@ -1032,12 +1052,25 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                         "Detected placeholder frame for %s but awaiting failure text",
                         identifier,
                     )
+                    if recorder:
+                        recorder.log(
+                            "Placeholder frame detected for %s; waiting for offline text"
+                            % identifier
+                        )
 
                 if not backend:
                     continue
 
                 text = await asyncio.to_thread(_read_text_from_image, image_bytes, backend)
                 if not text:
+                    if recorder:
+                        label_texts = candidate.get("labelTexts") or []
+                        label = identifier or ", ".join(str(label) for label in label_texts)
+                        if label:
+                            recorder.log(
+                                "No OCR text extracted for %s despite offline indicators"
+                                % label
+                            )
                     continue
 
                 cleaned_text = text.replace("\n", " ").strip()
@@ -1052,6 +1085,13 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                             identifier,
                             cleaned_text[:240],
                         )
+                        if recorder:
+                            preview = cleaned_text[:200]
+                            if len(cleaned_text) > 200:
+                                preview += "…"
+                            recorder.log(
+                                "OCR detected offline text for %s: %s" % (identifier, preview)
+                            )
                 else:
                     identifier = str(candidate.get("identifier") or "").strip()
                     label_texts = candidate.get("labelTexts") or []
@@ -1061,12 +1101,22 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                             identifier,
                             cleaned_text[:240],
                         )
+                        if recorder:
+                            recorder.log(
+                                "OCR text for %s did not match failure keywords"
+                                % identifier
+                            )
                     elif label_texts:
                         logger.debug(
                             "OCR text for camera labeled %s did not match failure keywords: %s",
                             ", ".join(str(label) for label in label_texts),
                             cleaned_text[:240],
                         )
+                        if recorder:
+                            recorder.log(
+                                "OCR text for camera labeled %s did not match failure keywords"
+                                % ", ".join(str(label) for label in label_texts)
+                            )
 
             if not backend:
                 logger.debug(
@@ -1446,7 +1496,9 @@ async def check_host(
                 "notification": None,
             }
         initial_failed = await _detect_failed_cameras(
-            page, use_gpu_for_ocr=config.use_gpu_for_ocr
+            page,
+            use_gpu_for_ocr=config.use_gpu_for_ocr,
+            recorder=recorder,
         )
         if recorder:
             recorder.log(
@@ -1558,7 +1610,9 @@ async def check_host(
                 "notification": None,
             }
         detected_retry_ids = await _detect_failed_cameras(
-            page, use_gpu_for_ocr=config.use_gpu_for_ocr
+            page,
+            use_gpu_for_ocr=config.use_gpu_for_ocr,
+            recorder=recorder,
         )
         retry_failed_ids: List[str] = []
         seen_retry_ids: set[str] = set()
