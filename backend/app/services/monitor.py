@@ -1364,6 +1364,21 @@ async def check_host(
             len(initial_failed),
         )
         if not initial_failed:
+            success_path = (
+                SCREENSHOT_DIR
+                / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-success.png"
+            )
+            success_screenshot = await _fetch_page_screenshot(page, success_path)
+            if recorder:
+                recorder.log(
+                    f"Captured dashboard screenshot at {success_screenshot}"
+                )
+                preview = "; ".join(console_messages[-5:])[:500]
+                recorder.log(
+                    f"Recent browser console output: {preview}"
+                    if preview
+                    else "No browser console output captured"
+                )
             if debug_mode and initial_trace_started:
                 trace_path = TRACE_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial-trace.zip"
                 if saved := await _stop_tracing(context, trace_path, recorder, "initial"):
