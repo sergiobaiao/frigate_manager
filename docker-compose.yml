@@ -9,7 +9,6 @@ services:
       - "8000:8000"
     environment:
       - DATA_DIR=/data
-      - MONITOR_MAX_INSTANCES=1
     volumes:
       - ./data:/data
       - ./backend/app:/app/app:ro
