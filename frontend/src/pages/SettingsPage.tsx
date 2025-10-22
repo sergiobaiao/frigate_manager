@@ -29,6 +29,16 @@ const SettingsPage = () => {
     }
   }, [config?.MENTION_USER_IDS]);
 
+  useEffect(() => {
+    if (config?.USE_GPU_FOR_OCR !== undefined) {
+      setFormState((previous) =>
+        previous.USE_GPU_FOR_OCR === undefined
+          ? { ...previous, USE_GPU_FOR_OCR: config.USE_GPU_FOR_OCR }
+          : previous
+      );
+    }
+  }, [config?.USE_GPU_FOR_OCR]);
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     const payload: Partial<Config> = {
@@ -138,7 +148,8 @@ const SettingsPage = () => {
           </label>
           <p className="hint-text" style={{ marginTop: '0.25rem' }}>
             When enabled, Frigate Manager will attempt to use GPU resources for OCR-based camera
-            failure detection.
+            failure detection. Make sure the container has access to GPU drivers and runtimes so
+            the OCR backend can initialise successfully.
           </p>
         </div>
         <div>
