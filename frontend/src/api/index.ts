@@ -44,6 +44,7 @@ export type Config = {
   CHECK_INTERVAL_MINUTES: number;
   RETRY_DELAY_MINUTES: number;
   DEBUG_MODE: boolean;
+  USE_GPU_FOR_OCR: boolean;
 };
 
 export type ScreenshotTestResponse = {

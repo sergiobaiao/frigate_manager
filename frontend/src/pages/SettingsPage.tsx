@@ -129,6 +129,22 @@ const SettingsPage = () => {
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <input
               type="checkbox"
+              checked={formState.USE_GPU_FOR_OCR ?? config?.USE_GPU_FOR_OCR ?? false}
+              onChange={(event) =>
+                setFormState((prev) => ({ ...prev, USE_GPU_FOR_OCR: event.target.checked }))
+              }
+            />
+            Enable GPU acceleration for camera recognition
+          </label>
+          <p className="hint-text" style={{ marginTop: '0.25rem' }}>
+            When enabled, Frigate Manager will attempt to use GPU resources for OCR-based camera
+            failure detection.
+          </p>
+        </div>
+        <div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <input
+              type="checkbox"
               checked={formState.DEBUG_MODE ?? config?.DEBUG_MODE ?? false}
               onChange={(event) =>
                 setFormState((prev) => ({ ...prev, DEBUG_MODE: event.target.checked }))
