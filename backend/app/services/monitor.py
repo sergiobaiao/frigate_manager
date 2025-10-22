@@ -6,7 +6,7 @@ import io
 import logging
 import threading
 import zipfile
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
@@ -1082,7 +1082,73 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     return last_result
 
 
+def _expire_stale_checks(host_id: int, config_manager: ConfigManager) -> None:
+    """Mark orphaned checks as failed when they've been inactive for too long.
+
+    In certain crash scenarios the application could be restarted while a host
+    check was still marked as "running" or "pending" in the database. Those
+    orphaned rows prevent the frontend from ever showing the latest successful
+    run because the `/summary` endpoint continues to report an active check.
+
+    To recover automatically we look for checks that have not been updated
+    within a generous grace window and mark them as errors before queueing a
+    fresh run.
+    """
+
+    config = config_manager.get()
+    grace_minutes = max(
+        (config.retry_delay_minutes * 2) + 5,
+        config.check_interval_minutes + 5,
+        15,
+    )
+    cutoff = datetime.now(dt_timezone.utc) - timedelta(minutes=grace_minutes)
+
+    with get_session() as session:
+        host = session.get(Host, host_id)
+        if not host:
+            return
+
+        stale_checks = session.exec(
+            select(HostCheck)
+            .where(
+                HostCheck.host_id == host_id,
+                HostCheck.status.in_(["pending", "running"]),
+                HostCheck.updated_at < cutoff,
+            )
+            .order_by(HostCheck.created_at)
+        ).all()
+
+        if not stale_checks:
+            return
+
+        timestamp = now_tz(config_manager.timezone).isoformat()
+        now_utc = datetime.now(dt_timezone.utc)
+        message = "Previous check marked as failed after exceeding the inactivity window"
+
+        for check in stale_checks:
+            log_entries = list(check.log or [])
+            log_entries.append({"timestamp": timestamp, "message": message})
+            check.log = log_entries
+            if not check.summary:
+                check.summary = "Check ended unexpectedly"
+            check.status = "error"
+            if check.finished_at is None:
+                check.finished_at = now_utc
+            check.updated_at = now_utc
+
+        session.add_all(stale_checks)
+        session.commit()
+
+        logger.warning(
+            "Marked %s stale host check(s) for %s (id=%s) as error",
+            len(stale_checks),
+            host.name,
+            host_id,
+        )
+
+
 def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager) -> HostCheck:
+    _expire_stale_checks(host_id, config_manager)
     now = datetime.now(dt_timezone.utc)
     initial_message = "Manual check requested" if trigger == "manual" else "Scheduled check queued"
     check = HostCheck(
