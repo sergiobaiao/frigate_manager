@@ -50,9 +50,27 @@ async def on_shutdown() -> None:
     scheduler.shutdown()
 
 
+class PrivateNetworkCORSMiddleware(CORSMiddleware):
+    """Extend FastAPI's CORS middleware to support private network requests."""
+
+    @staticmethod
+    def _allow_private_network(request, response):
+        if request.headers.get("access-control-request-private-network", "").lower() == "true":
+            response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+
+    def preflight_response(self, request):  # type: ignore[override]
+        response = super().preflight_response(request)
+        return self._allow_private_network(request, response)
+
+    def simple_response(self, request, response):  # type: ignore[override]
+        response = super().simple_response(request, response)
+        return self._allow_private_network(request, response)
+
+
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
+    PrivateNetworkCORSMiddleware,
+    allow_origin_regex=r".*",
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,
