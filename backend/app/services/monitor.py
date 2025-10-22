@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import threading
@@ -1239,8 +1240,34 @@ async def run_host_check(
         host.base_url,
     )
     recorder.start(host.name)
+    config = config_manager.get()
+    timeout_seconds = max(600, (config.retry_delay_minutes + 5) * 60)
+    check_task = asyncio.create_task(
+        check_host(host, config_manager, recorder=recorder, notify=notify)
+    )
     try:
-        result = await check_host(host, config_manager, recorder=recorder, notify=notify)
+        result = await asyncio.wait_for(check_task, timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        check_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await check_task
+        logger.error(
+            "Host check %s for %s timed out after %s seconds",
+            check.id,
+            host.name,
+            timeout_seconds,
+        )
+        minutes = timeout_seconds // 60
+        recorder.log(
+            "Host check timed out after %s minute(s); marking as error" % minutes
+        )
+        recorder.complete("error", "Host check timed out")
+        return {
+            "status": "error",
+            "summary": "Host check timed out",
+            "failure_event": None,
+            "notification": None,
+        }
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Monitoring task raised an exception for host %s", host.name, exc_info=exc)
         recorder.log(f"Unexpected error: {exc}")
