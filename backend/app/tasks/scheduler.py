@@ -38,7 +38,12 @@ class MonitorScheduler:
         self.start()
 
     async def _run_monitoring(self) -> None:
-        await run_monitoring(self.manager)
+        # Reload the environment override on every execution so that a
+        # configuration change takes effect without recreating the scheduler.
+        self.max_instances = self._load_max_instances()
+        await run_monitoring(
+            self.manager, max_concurrent_checks=self.max_instances
+        )
 
     def shutdown(self) -> None:
         if self.scheduler.running:

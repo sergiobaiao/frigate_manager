@@ -1,8 +1,9 @@
+import asyncio
 import os
 import unittest
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from backend.app.tasks.scheduler import MonitorScheduler
 
@@ -46,6 +47,21 @@ class MonitorSchedulerMaxInstancesTests(unittest.TestCase):
         with patch.dict(os.environ, {"MONITOR_MAX_INSTANCES": "invalid"}, clear=True):
             scheduler = MonitorScheduler(self.manager)
             self.assertEqual(scheduler.max_instances, 1)
+
+    def test_passes_concurrency_limit_to_monitoring(self) -> None:
+        async def _run(scheduler: MonitorScheduler) -> None:
+            await scheduler._run_monitoring()
+
+        with patch.dict(os.environ, {"MONITOR_MAX_INSTANCES": "4"}, clear=True):
+            scheduler = MonitorScheduler(self.manager)
+            with patch(
+                "backend.app.tasks.scheduler.run_monitoring",
+                new_callable=AsyncMock,
+            ) as mock_monitor:
+                asyncio.run(_run(scheduler))
+        mock_monitor.assert_awaited_once_with(
+            self.manager, max_concurrent_checks=4
+        )
 
 
 if __name__ == "__main__":
