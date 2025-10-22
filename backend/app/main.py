@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers, MutableHeaders
 
 from .config import ConfigManager
 from .database import init_db
@@ -54,18 +55,23 @@ class PrivateNetworkCORSMiddleware(CORSMiddleware):
     """Extend FastAPI's CORS middleware to support private network requests."""
 
     @staticmethod
-    def _allow_private_network(request, response):
-        if request.headers.get("access-control-request-private-network", "").lower() == "true":
+    def _should_allow_private_network(headers: Headers) -> bool:
+        return headers.get("access-control-request-private-network", "").lower() == "true"
+
+    def preflight_response(self, request_headers: Headers):  # type: ignore[override]
+        response = super().preflight_response(request_headers)
+        if self._should_allow_private_network(request_headers):
             response.headers["Access-Control-Allow-Private-Network"] = "true"
         return response
 
-    def preflight_response(self, request):  # type: ignore[override]
-        response = super().preflight_response(request)
-        return self._allow_private_network(request, response)
-
-    def simple_response(self, request, response):  # type: ignore[override]
-        response = super().simple_response(request, response)
-        return self._allow_private_network(request, response)
+    async def send(self, message, send, request_headers):  # type: ignore[override]
+        if (
+            message["type"] == "http.response.start"
+            and self._should_allow_private_network(request_headers)
+        ):
+            headers = MutableHeaders(scope=message)
+            headers["Access-Control-Allow-Private-Network"] = "true"
+        await super().send(message, send=send, request_headers=request_headers)
 
 
 app.add_middleware(
