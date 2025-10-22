@@ -982,9 +982,6 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     last_result: List[str] = []
     hidden_visual_counts: Dict[str, int] = {}
     hidden_visual_threshold = 6
-    placeholder_counts: Dict[str, int] = {}
-    placeholder_start_attempt = 4
-    placeholder_threshold = 3
     for attempt in range(attempts):
         scan_results = await _scan_once()
         seen_identifiers: set[str] = set()
@@ -1060,19 +1057,10 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                 placeholder = _detect_placeholder_frame(image_bytes)
                 identifier = str(candidate.get("identifier") or "").strip()
                 if placeholder and identifier:
-                    if attempt >= placeholder_start_attempt:
-                        count = placeholder_counts.get(identifier, 0) + 1
-                        placeholder_counts[identifier] = count
-                        if count >= placeholder_threshold and identifier not in seen_identifiers:
-                            seen_identifiers.add(identifier)
-                            failures.append(identifier)
-                            logger.debug(
-                                "Detected failed camera via placeholder analysis (%s)",
-                                identifier,
-                            )
-                            continue
-                elif identifier and identifier in placeholder_counts:
-                    placeholder_counts.pop(identifier, None)
+                    logger.debug(
+                        "Detected placeholder frame for %s but awaiting failure text",
+                        identifier,
+                    )
 
                 if not backend:
                     continue
