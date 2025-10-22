@@ -230,7 +230,7 @@ def _contains_failure_text(text: str, failure_texts: List[str]) -> bool:
     if not text:
         return False
     lower = text.lower()
-    return all(snippet in lower for snippet in failure_texts)
+    return any(snippet in lower for snippet in failure_texts)
 
 
 class FailureNotification(TypedDict):
@@ -421,6 +421,7 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     failure_texts = [
         "no frames have been received",
         "check error logs",
+        "failed to load resource",
     ]
     failure_image_hints = [
         "no-frame",
@@ -486,7 +487,7 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                         return false;
                     }
                     const lower = String(content).toLowerCase();
-                    return normalizedTexts.every((snippet) => lower.includes(snippet));
+                    return normalizedTexts.some((snippet) => lower.includes(snippet));
                 };
 
                 const ariaLabelFromIds = (element, attribute) => {
