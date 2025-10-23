@@ -1197,8 +1197,33 @@ def _expire_stale_checks(host_id: int, config_manager: ConfigManager) -> None:
         )
 
 
-def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager) -> HostCheck:
+def _find_active_check(host_id: int) -> Optional[HostCheck]:
+    with get_session() as session:
+        return (
+            session.exec(
+                select(HostCheck)
+                .where(
+                    HostCheck.host_id == host_id,
+                    HostCheck.status.in_(["pending", "running"]),
+                )
+                .order_by(HostCheck.created_at.desc())
+                .limit(1)
+            ).first()
+        )
+
+
+def create_host_check(
+    host_id: int, trigger: str, config_manager: ConfigManager
+) -> tuple[HostCheck, bool]:
     _expire_stale_checks(host_id, config_manager)
+    if existing := _find_active_check(host_id):
+        logger.info(
+            "Host %s already has an active check %s with status %s; reusing existing run",
+            host_id,
+            existing.id,
+            existing.status,
+        )
+        return existing, False
     now = datetime.now(dt_timezone.utc)
     initial_message = "Manual check requested" if trigger == "manual" else "Scheduled check queued"
     check = HostCheck(
@@ -1224,7 +1249,7 @@ def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager)
             check.id,
             host_id,
         )
-        return check
+        return check, True
 
 
 def _update_check_record(
@@ -1417,8 +1442,19 @@ async def run_host_check(
     return result
 
 
-def queue_host_check(host_id: int, config_manager: ConfigManager, trigger: str = "manual") -> HostCheck:
-    check = create_host_check(host_id, trigger, config_manager)
+def queue_host_check(
+    host_id: int, config_manager: ConfigManager, trigger: str = "manual"
+) -> HostCheck:
+    check, created = create_host_check(host_id, trigger, config_manager)
+    if not created:
+        logger.info(
+            "Skipping new %s check for host id %s; check %s is already %s",
+            trigger,
+            host_id,
+            check.id,
+            check.status,
+        )
+        return check
     logger.info(
         "Queueing %s host check %s for host id %s",
         trigger,
@@ -1787,8 +1823,19 @@ async def run_monitoring(config_manager: ConfigManager) -> None:
         chunk_names = ", ".join(host.name for host in chunk)
         logger.info("Queueing checks for host batch: %s", chunk_names)
         tasks: List[asyncio.Task[HostCheckResult]] = []
+        scheduled_hosts: List[Host] = []
         for host in chunk:
-            check = create_host_check(host.id, "scheduled", config_manager)
+            check, created = create_host_check(host.id, "scheduled", config_manager)
+            if not created:
+                logger.info(
+                    "Skipping scheduled check for %s (id=%s); check %s already %s",
+                    host.name,
+                    host.id,
+                    check.id,
+                    check.status,
+                )
+                continue
+            scheduled_hosts.append(host)
             tasks.append(
                 asyncio.create_task(
                     run_host_check(check.id, config_manager, notify=False),
@@ -1798,7 +1845,7 @@ async def run_monitoring(config_manager: ConfigManager) -> None:
         if not tasks:
             continue
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for host, result in zip(chunk, results):
+        for host, result in zip(scheduled_hosts, results):
             if isinstance(result, Exception):  # pragma: no cover - logging
                 logger.exception(
                     "Monitoring task raised an exception for host %s", host.name, exc_info=result
