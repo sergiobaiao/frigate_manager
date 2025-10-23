@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from sqlmodel import select
 
 from ..database import get_session
-from ..models import Host
+from ..models import FailureEvent, Host, HostCheck, LogEntry
 from ..schemas.checks import HostCheckRead
 from ..schemas.hosts import HostCreate, HostRead, HostUpdate
 from ..services.monitor import queue_host_check
@@ -57,6 +57,15 @@ def delete_host(host_id: int) -> dict:
         host = session.get(Host, host_id)
         if not host:
             raise HTTPException(status_code=404, detail="Host not found")
+        host_checks = session.exec(select(HostCheck).where(HostCheck.host_id == host_id)).all()
+        for check in host_checks:
+            session.delete(check)
+        failure_events = session.exec(select(FailureEvent).where(FailureEvent.host_id == host_id)).all()
+        for failure_event in failure_events:
+            session.delete(failure_event)
+        log_entries = session.exec(select(LogEntry).where(LogEntry.host_id == host_id)).all()
+        for log_entry in log_entries:
+            session.delete(log_entry)
         session.delete(host)
         session.commit()
     return {"status": "deleted"}
