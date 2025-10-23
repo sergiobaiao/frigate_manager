@@ -6,7 +6,7 @@ import io
 import logging
 import threading
 import zipfile
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
@@ -379,7 +379,12 @@ async def _stop_tracing(
     return saved_path
 
 
-async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
+async def _detect_failed_cameras(
+    page,
+    *,
+    use_gpu_for_ocr: bool,
+    recorder: Optional["HostCheckRecorder"] = None,
+) -> List[str]:
     await page.wait_for_selector("body", timeout=30000)
     label_selectors = [
         '[data-testid="camera-title"]',
@@ -974,6 +979,8 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     attempts = 10
     delay_ms = 1000
     last_result: List[str] = []
+    backend_logged = False
+    backend_missing_logged = False
     for attempt in range(attempts):
         scan_results = await _scan_once()
         seen_identifiers: set[str] = set()
@@ -1006,6 +1013,19 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
 
         if ocr_candidates:
             backend = _ensure_ocr_backend(use_gpu_for_ocr)
+            if recorder and backend and not backend_logged:
+                recorder.log(
+                    "Using %s OCR backend to inspect %s candidate camera(s)"
+                    % (backend, len(ocr_candidates))
+                )
+                backend_logged = True
+            if recorder and not backend and not backend_missing_logged:
+                reason = _OCR_BACKEND_ERROR or "OCR dependencies unavailable"
+                recorder.log(
+                    "Skipping OCR checks for %s camera candidate(s): %s"
+                    % (len(ocr_candidates), reason)
+                )
+                backend_missing_logged = True
             prioritized: List[Dict[str, Any]] = []
             prioritized.extend(
                 [candidate for candidate in ocr_candidates if candidate.get("imageHints")]
@@ -1032,12 +1052,25 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                         "Detected placeholder frame for %s but awaiting failure text",
                         identifier,
                     )
+                    if recorder:
+                        recorder.log(
+                            "Placeholder frame detected for %s; waiting for offline text"
+                            % identifier
+                        )
 
                 if not backend:
                     continue
 
                 text = await asyncio.to_thread(_read_text_from_image, image_bytes, backend)
                 if not text:
+                    if recorder:
+                        label_texts = candidate.get("labelTexts") or []
+                        label = identifier or ", ".join(str(label) for label in label_texts)
+                        if label:
+                            recorder.log(
+                                "No OCR text extracted for %s despite offline indicators"
+                                % label
+                            )
                     continue
 
                 cleaned_text = text.replace("\n", " ").strip()
@@ -1052,6 +1085,13 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                             identifier,
                             cleaned_text[:240],
                         )
+                        if recorder:
+                            preview = cleaned_text[:200]
+                            if len(cleaned_text) > 200:
+                                preview += "…"
+                            recorder.log(
+                                "OCR detected offline text for %s: %s" % (identifier, preview)
+                            )
                 else:
                     identifier = str(candidate.get("identifier") or "").strip()
                     label_texts = candidate.get("labelTexts") or []
@@ -1061,12 +1101,22 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                             identifier,
                             cleaned_text[:240],
                         )
+                        if recorder:
+                            recorder.log(
+                                "OCR text for %s did not match failure keywords"
+                                % identifier
+                            )
                     elif label_texts:
                         logger.debug(
                             "OCR text for camera labeled %s did not match failure keywords: %s",
                             ", ".join(str(label) for label in label_texts),
                             cleaned_text[:240],
                         )
+                        if recorder:
+                            recorder.log(
+                                "OCR text for camera labeled %s did not match failure keywords"
+                                % ", ".join(str(label) for label in label_texts)
+                            )
 
             if not backend:
                 logger.debug(
@@ -1082,7 +1132,98 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     return last_result
 
 
-def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager) -> HostCheck:
+def _expire_stale_checks(host_id: int, config_manager: ConfigManager) -> None:
+    """Mark orphaned checks as failed when they've been inactive for too long.
+
+    In certain crash scenarios the application could be restarted while a host
+    check was still marked as "running" or "pending" in the database. Those
+    orphaned rows prevent the frontend from ever showing the latest successful
+    run because the `/summary` endpoint continues to report an active check.
+
+    To recover automatically we look for checks that have not been updated
+    within a generous grace window and mark them as errors before queueing a
+    fresh run.
+    """
+
+    config = config_manager.get()
+    grace_minutes = max(
+        (config.retry_delay_minutes * 2) + 5,
+        config.check_interval_minutes + 5,
+        15,
+    )
+    cutoff = datetime.now(dt_timezone.utc) - timedelta(minutes=grace_minutes)
+
+    with get_session() as session:
+        host = session.get(Host, host_id)
+        if not host:
+            return
+
+        stale_checks = session.exec(
+            select(HostCheck)
+            .where(
+                HostCheck.host_id == host_id,
+                HostCheck.status.in_(["pending", "running"]),
+                HostCheck.updated_at < cutoff,
+            )
+            .order_by(HostCheck.created_at)
+        ).all()
+
+        if not stale_checks:
+            return
+
+        timestamp = now_tz(config_manager.timezone).isoformat()
+        now_utc = datetime.now(dt_timezone.utc)
+        message = "Previous check marked as failed after exceeding the inactivity window"
+
+        for check in stale_checks:
+            log_entries = list(check.log or [])
+            log_entries.append({"timestamp": timestamp, "message": message})
+            check.log = log_entries
+            if not check.summary:
+                check.summary = "Check ended unexpectedly"
+            check.status = "error"
+            if check.finished_at is None:
+                check.finished_at = now_utc
+            check.updated_at = now_utc
+
+        session.add_all(stale_checks)
+        session.commit()
+
+        logger.warning(
+            "Marked %s stale host check(s) for %s (id=%s) as error",
+            len(stale_checks),
+            host.name,
+            host_id,
+        )
+
+
+def _find_active_check(host_id: int) -> Optional[HostCheck]:
+    with get_session() as session:
+        return (
+            session.exec(
+                select(HostCheck)
+                .where(
+                    HostCheck.host_id == host_id,
+                    HostCheck.status.in_(["pending", "running"]),
+                )
+                .order_by(HostCheck.created_at.desc())
+                .limit(1)
+            ).first()
+        )
+
+
+def create_host_check(
+    host_id: int, trigger: str, config_manager: ConfigManager
+) -> tuple[HostCheck, bool]:
+    _expire_stale_checks(host_id, config_manager)
+    if existing := _find_active_check(host_id):
+        logger.info(
+            "Host %s already has an active check %s with status %s; reusing existing run",
+            host_id,
+            existing.id,
+            existing.status,
+        )
+        return existing, False
     now = datetime.now(dt_timezone.utc)
     initial_message = "Manual check requested" if trigger == "manual" else "Scheduled check queued"
     check = HostCheck(
@@ -1108,7 +1249,7 @@ def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager)
             check.id,
             host_id,
         )
-        return check
+        return check, True
 
 
 def _update_check_record(
@@ -1301,8 +1442,19 @@ async def run_host_check(
     return result
 
 
-def queue_host_check(host_id: int, config_manager: ConfigManager, trigger: str = "manual") -> HostCheck:
-    check = create_host_check(host_id, trigger, config_manager)
+def queue_host_check(
+    host_id: int, config_manager: ConfigManager, trigger: str = "manual"
+) -> HostCheck:
+    check, created = create_host_check(host_id, trigger, config_manager)
+    if not created:
+        logger.info(
+            "Skipping new %s check for host id %s; check %s is already %s",
+            trigger,
+            host_id,
+            check.id,
+            check.status,
+        )
+        return check
     logger.info(
         "Queueing %s host check %s for host id %s",
         trigger,
@@ -1380,7 +1532,9 @@ async def check_host(
                 "notification": None,
             }
         initial_failed = await _detect_failed_cameras(
-            page, use_gpu_for_ocr=config.use_gpu_for_ocr
+            page,
+            use_gpu_for_ocr=config.use_gpu_for_ocr,
+            recorder=recorder,
         )
         if recorder:
             recorder.log(
@@ -1492,7 +1646,9 @@ async def check_host(
                 "notification": None,
             }
         detected_retry_ids = await _detect_failed_cameras(
-            page, use_gpu_for_ocr=config.use_gpu_for_ocr
+            page,
+            use_gpu_for_ocr=config.use_gpu_for_ocr,
+            recorder=recorder,
         )
         retry_failed_ids: List[str] = []
         seen_retry_ids: set[str] = set()
@@ -1667,8 +1823,19 @@ async def run_monitoring(config_manager: ConfigManager) -> None:
         chunk_names = ", ".join(host.name for host in chunk)
         logger.info("Queueing checks for host batch: %s", chunk_names)
         tasks: List[asyncio.Task[HostCheckResult]] = []
+        scheduled_hosts: List[Host] = []
         for host in chunk:
-            check = create_host_check(host.id, "scheduled", config_manager)
+            check, created = create_host_check(host.id, "scheduled", config_manager)
+            if not created:
+                logger.info(
+                    "Skipping scheduled check for %s (id=%s); check %s already %s",
+                    host.name,
+                    host.id,
+                    check.id,
+                    check.status,
+                )
+                continue
+            scheduled_hosts.append(host)
             tasks.append(
                 asyncio.create_task(
                     run_host_check(check.id, config_manager, notify=False),
@@ -1678,7 +1845,7 @@ async def run_monitoring(config_manager: ConfigManager) -> None:
         if not tasks:
             continue
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for host, result in zip(chunk, results):
+        for host, result in zip(scheduled_hosts, results):
             if isinstance(result, Exception):  # pragma: no cover - logging
                 logger.exception(
                     "Monitoring task raised an exception for host %s", host.name, exc_info=result
