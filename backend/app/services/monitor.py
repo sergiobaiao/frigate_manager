@@ -1123,27 +1123,44 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
     return last_result
 
 
-def create_host_check(host_id: int, trigger: str, config_manager: ConfigManager) -> HostCheck:
+def create_host_check(
+    host_id: int, trigger: str, config_manager: ConfigManager
+) -> tuple[HostCheck, bool]:
     now = datetime.now(dt_timezone.utc)
-    initial_message = "Manual check requested" if trigger == "manual" else "Scheduled check queued"
-    check = HostCheck(
-        host_id=host_id,
-        trigger=trigger,
-        status="pending",
-        log=[
-            {
-                "timestamp": now_tz(config_manager.timezone).isoformat(),
-                "message": initial_message,
-            }
-        ],
-        created_at=now,
-        updated_at=now,
+    initial_message = (
+        "Manual check requested" if trigger == "manual" else "Scheduled check queued"
     )
     with get_session() as session:
+        if trigger == "scheduled":
+            existing_check = session.exec(
+                select(HostCheck)
+                .where(
+                    HostCheck.host_id == host_id,
+                    HostCheck.trigger == "scheduled",
+                    HostCheck.finished_at.is_(None),
+                )
+                .order_by(HostCheck.created_at.desc())
+            ).first()
+            if existing_check is not None:
+                return existing_check, False
+
+        check = HostCheck(
+            host_id=host_id,
+            trigger=trigger,
+            status="pending",
+            log=[
+                {
+                    "timestamp": now_tz(config_manager.timezone).isoformat(),
+                    "message": initial_message,
+                }
+            ],
+            created_at=now,
+            updated_at=now,
+        )
         session.add(check)
         session.commit()
         session.refresh(check)
-        return check
+        return check, True
 
 
 def _update_check_record(
@@ -1303,7 +1320,7 @@ async def run_host_check(
 
 
 def queue_host_check(host_id: int, config_manager: ConfigManager, trigger: str = "manual") -> HostCheck:
-    check = create_host_check(host_id, trigger, config_manager)
+    check, _ = create_host_check(host_id, trigger, config_manager)
     asyncio.create_task(
         run_host_check(check.id, config_manager),
         name=f"host-check-{host_id}-{trigger}",
