@@ -1186,17 +1186,30 @@ class HostCheckRecorder:
     def __init__(self, check_id: int, config_manager: ConfigManager) -> None:
         self.check_id = check_id
         self.timezone = config_manager.timezone
+        self._host_name: Optional[str] = None
+
+    def _log_to_console(self, level: int, message: str) -> None:
+        context = f"HostCheck[{self.check_id}"
+        if self._host_name:
+            context += f":{self._host_name}"
+        context += "]"
+        logger.log(level, "%s %s", context, message)
 
     def start(self, host_name: str) -> None:
+        self._host_name = host_name
+        message = f"Starting check for {host_name}"
+        self._log_to_console(logging.INFO, message)
         _update_check_record(
             self.check_id,
             self.timezone,
             status="running",
-            message=f"Starting check for {host_name}",
+            message=message,
             mark_started=True,
         )
 
     def log(self, message: str) -> None:
+        if message:
+            self._log_to_console(logging.INFO, message)
         _update_check_record(self.check_id, self.timezone, message=message)
 
     def complete(
@@ -1206,6 +1219,8 @@ class HostCheckRecorder:
         *,
         failure_event_id: Optional[int] = None,
     ) -> None:
+        completion_message = f"Check finished with status {status}: {summary}"
+        self._log_to_console(logging.INFO, completion_message)
         _update_check_record(
             self.check_id,
             self.timezone,
@@ -1216,6 +1231,7 @@ class HostCheckRecorder:
         )
 
     def skip(self, summary: str) -> None:
+        self._log_to_console(logging.INFO, f"Check skipped: {summary}")
         _update_check_record(
             self.check_id,
             self.timezone,
@@ -1364,6 +1380,16 @@ async def check_host(
             recorder.log(
                 f"Initial scan detected {len(initial_failed)} failing cameras via dashboard inspection"
             )
+        first_path = SCREENSHOT_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial.png"
+        first_screenshot = await _fetch_page_screenshot(page, first_path)
+        if recorder:
+            recorder.log(f"Captured initial screenshot at {first_screenshot}")
+            preview = "; ".join(console_messages[-5:])[:500]
+            recorder.log(
+                f"Recent browser console output: {preview}"
+                if preview
+                else "No browser console output captured"
+            )
         if not initial_failed:
             if debug_mode and initial_trace_started:
                 trace_path = TRACE_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial-trace.zip"
@@ -1377,16 +1403,6 @@ async def check_host(
                 "failure_event": None,
                 "notification": None,
             }
-        first_path = SCREENSHOT_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial.png"
-        first_screenshot = await _fetch_page_screenshot(page, first_path)
-        if recorder:
-            recorder.log(f"Captured initial screenshot at {first_screenshot}")
-            preview = "; ".join(console_messages[-5:])[:500]
-            recorder.log(
-                f"Recent browser console output: {preview}"
-                if preview
-                else "No browser console output captured"
-            )
         if debug_mode and initial_trace_started:
             trace_path = TRACE_DIR / f"{hostname}-{timestamp.strftime('%Y%m%dT%H%M%S')}-initial-trace.zip"
             if saved := await _stop_tracing(context, trace_path, recorder, "initial"):

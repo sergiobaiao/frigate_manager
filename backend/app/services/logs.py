@@ -19,7 +19,12 @@ def save_log_file(hostname: str, service: str, content: str, base_dir: Path) -> 
     base_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{hostname}-{service}.log"
     path = base_dir / filename
-    path.write_text(content, encoding="utf-8")
+    try:
+        path.write_text(content, encoding="utf-8")
+    except FileNotFoundError:
+        # Ensure intermediary directories exist if the base directory was changed dynamically.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
     return path
 
 
