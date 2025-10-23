@@ -1597,8 +1597,19 @@ async def run_monitoring(config_manager: ConfigManager) -> None:
     for start in range(0, len(hosts), batch_size):
         chunk = hosts[start : start + batch_size]
         tasks: List[asyncio.Task[HostCheckResult]] = []
+        scheduled_hosts: List[Host] = []
         for host in chunk:
-            check = create_host_check(host.id, "scheduled", config_manager)
+            check, created = create_host_check(host.id, "scheduled", config_manager)
+            if not created:
+                logger.info(
+                    "Skipping scheduled check for %s (id=%s); check %s already %s",
+                    host.name,
+                    host.id,
+                    check.id,
+                    check.status,
+                )
+                continue
+            scheduled_hosts.append(host)
             tasks.append(
                 asyncio.create_task(
                     run_host_check(check.id, config_manager, notify=False),
