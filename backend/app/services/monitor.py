@@ -229,8 +229,8 @@ async def _extract_text_via_ocr(page, container_id: str, backend: str) -> str:
 def _contains_failure_text(text: str, failure_texts: List[str]) -> bool:
     if not text:
         return False
-    lower = text.lower()
-    return any(snippet in lower for snippet in failure_texts)
+    normalized = " ".join(text.lower().split())
+    return any(snippet in normalized for snippet in failure_texts)
 
 
 class FailureNotification(TypedDict):
@@ -418,18 +418,7 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
         'section',
         'figure',
     ]
-    failure_texts = [
-        "no frames have been received",
-        "no frames received",
-        "check error logs",
-        "error logs",
-        "camera offline",
-        "camera is offline",
-        "unable to load camera",
-        "disconnected",
-        "lost connection",
-        "no signal",
-    ]
+    failure_texts = ["no frames have been received, check error logs"]
     failure_image_hints = [
         "no-frame",
         "no_frame",
@@ -452,7 +441,13 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                     labelSelectors,
                     containerSelectors,
                 } = args;
-                const normalizedTexts = failureTexts.map((text) => text.toLowerCase());
+                const normalize = (value) => {
+                    if (value === null || value === undefined) {
+                        return "";
+                    }
+                    return String(value).toLowerCase().replace(/\\s+/g, " ").trim();
+                };
+                const normalizedTexts = failureTexts.map((text) => normalize(text));
                 const normalizedStates = failureStates.map((state) => state.toLowerCase());
                 const normalizedImageHints = failureImageHints.map((hint) => hint.toLowerCase());
 
@@ -493,8 +488,8 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                     if (!content) {
                         return false;
                     }
-                    const lower = String(content).toLowerCase();
-                    return normalizedTexts.some((snippet) => lower.includes(snippet));
+                    const normalized = normalize(content);
+                    return normalizedTexts.some((snippet) => normalized.includes(snippet));
                 };
 
                 const ariaLabelFromIds = (element, attribute) => {
@@ -505,7 +500,7 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                     if (!idList) {
                         return null;
                     }
-                    const ids = idList.split(/\s+/).filter(Boolean);
+                    const ids = idList.split(/\\s+/).filter(Boolean);
                     const ownerDocument = element.ownerDocument || document;
                     for (const id of ids) {
                         if (!ownerDocument) {
@@ -996,18 +991,19 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
             if not identifier:
                 continue
 
-            text_matches = entry.get("textMatches") or []
+            text_matches = [
+                match
+                for match in (entry.get("textMatches") or [])
+                if _contains_failure_text(match, failure_texts)
+            ]
             raw_state_matches = entry.get("stateMatches") or []
             spinner_matches = [
                 state
                 for state in raw_state_matches
                 if "spinner" in state.lower() or "loading" in state.lower()
             ]
-            state_matches = [
-                state for state in raw_state_matches if state not in spinner_matches
-            ]
 
-            if text_matches or state_matches:
+            if text_matches:
                 if identifier not in seen_identifiers:
                     seen_identifiers.add(identifier)
                     failures.append(identifier)
@@ -1021,15 +1017,12 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                     count = hidden_visual_counts.get(identifier, 0) + 1
                     hidden_visual_counts[identifier] = count
                     if count >= hidden_visual_threshold and identifier not in seen_identifiers:
-                        seen_identifiers.add(identifier)
-                        failures.append(identifier)
                         logger.debug(
-                            "Detected failed camera due to missing visual content (%s): hidden=%s states=%s",
+                            "Camera %s missing visual content but no failure text detected yet: hidden=%s states=%s",
                             identifier,
                             ",".join(str(item) for item in hidden_visuals[:5]) or "none",
                             ",".join(spinner_matches[:5]) or "none",
                         )
-                        continue
                 else:
                     hidden_visual_counts.pop(identifier, None)
 
@@ -1064,13 +1057,10 @@ async def _detect_failed_cameras(page, *, use_gpu_for_ocr: bool) -> List[str]:
                         count = placeholder_counts.get(identifier, 0) + 1
                         placeholder_counts[identifier] = count
                         if count >= placeholder_threshold and identifier not in seen_identifiers:
-                            seen_identifiers.add(identifier)
-                            failures.append(identifier)
                             logger.debug(
-                                "Detected failed camera via placeholder analysis (%s)",
+                                "Camera %s showing placeholder imagery but no failure text detected yet",
                                 identifier,
                             )
-                            continue
                 elif identifier and identifier in placeholder_counts:
                     placeholder_counts.pop(identifier, None)
 
